@@ -1,3 +1,5 @@
+from math import asin, cos, radians, sin, sqrt
+
 from rest_framework import serializers
 from app.serializers.company_projects.tenancy import TenancyReadSerializerMixin
 from app.models.core_modules.daily_operations.wastecollection import WasteCollection
@@ -72,6 +74,7 @@ class CustomerField(serializers.Field):
 
 
 class WasteCollectionSerializer(TenancyReadSerializerMixin, serializers.ModelSerializer):
+    MAX_COLLECTION_DISTANCE_METERS = 10
     # `customer` is now a read-only @property on the model (looked up from the
     # plain `customer_id` CharField), so writes target `customer_id` directly.
     customer = CustomerField(
@@ -164,3 +167,72 @@ class WasteCollectionSerializer(TenancyReadSerializerMixin, serializers.ModelSer
         customer = cached_related(obj, "customer")
         panchayat = related(customer, "panchayat") if customer else None
         return panchayat.panchayat_name if panchayat else None
+
+    @staticmethod
+    def _distance_in_meters(from_latitude, from_longitude, to_latitude, to_longitude):
+        """Great-circle distance using the haversine formula."""
+        earth_radius_m = 6_371_000
+        latitude_delta = radians(float(to_latitude) - float(from_latitude))
+        longitude_delta = radians(float(to_longitude) - float(from_longitude))
+        origin_latitude = radians(float(from_latitude))
+        destination_latitude = radians(float(to_latitude))
+        haversine = (
+            sin(latitude_delta / 2) ** 2
+            + cos(origin_latitude)
+            * cos(destination_latitude)
+            * sin(longitude_delta / 2) ** 2
+        )
+        return 2 * earth_radius_m * asin(sqrt(haversine))
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        status = attrs.get("status", getattr(self.instance, "status", None))
+        if status != WasteCollection.STATUS_COLLECTED:
+            return attrs
+
+        customer_id = attrs.get("customer_id", getattr(self.instance, "customer_id", None))
+        latitude = attrs.get("latitude", getattr(self.instance, "latitude", None))
+        longitude = attrs.get("longitude", getattr(self.instance, "longitude", None))
+        errors = {}
+        if latitude is None:
+            errors["latitude"] = "Collection latitude is required when marking a collection as Collected."
+        if longitude is None:
+            errors["longitude"] = "Collection longitude is required when marking a collection as Collected."
+        if errors:
+            raise serializers.ValidationError(errors)
+
+        if not -90 <= float(latitude) <= 90:
+            raise serializers.ValidationError(
+                {"latitude": "Collection latitude must be between -90 and 90."}
+            )
+        if not -180 <= float(longitude) <= 180:
+            raise serializers.ValidationError(
+                {"longitude": "Collection longitude must be between -180 and 180."}
+            )
+
+        customer = CustomerCreation.objects.filter(
+            unique_id=customer_id, is_deleted=False
+        ).first()
+        if not customer:
+            raise serializers.ValidationError({"customer": "A valid customer is required."})
+        try:
+            customer_latitude = float(customer.latitude)
+            customer_longitude = float(customer.longitude)
+        except (TypeError, ValueError):
+            raise serializers.ValidationError(
+                {"customer": "The selected customer does not have valid latitude and longitude."}
+            )
+
+        distance = self._distance_in_meters(
+            customer_latitude, customer_longitude, latitude, longitude
+        )
+        if distance > self.MAX_COLLECTION_DISTANCE_METERS:
+            raise serializers.ValidationError(
+                {
+                    "latitude": (
+                        f"Collection location is {distance:.1f} m from the customer. "
+                        f"It must be within {self.MAX_COLLECTION_DISTANCE_METERS} m."
+                    )
+                }
+            )
+        return attrs

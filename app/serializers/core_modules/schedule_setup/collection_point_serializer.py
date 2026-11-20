@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 from app.serializers.company_projects.tenancy import TenancyReadSerializerMixin
 from app.models.core_modules.schedule_setup.collection_point import Collection_point
@@ -136,6 +138,20 @@ class CollectionPointSerializer(TenancyReadSerializerMixin, serializers.ModelSer
     def get_zone_name(self, obj):
         zone = related(obj, "zone", Zone, "zone_id")
         return zone.zone_name if zone else None
+
+    def validate_latitude(self, value):
+        if not Decimal("-90") <= value <= Decimal("90"):
+            raise serializers.ValidationError(
+                "Latitude must be between -90 and 90."
+            )
+        return value
+
+    def validate_longitude(self, value):
+        if not Decimal("-180") <= value <= Decimal("180"):
+            raise serializers.ValidationError(
+                "Longitude must be between -180 and 180."
+            )
+        return value
 
     class Meta:
         model = Collection_point

@@ -2,8 +2,7 @@ import re
 import csv
 import io
 
-from django.db.models import Q, Count, Prefetch
-from django.db.models.functions import Upper
+from django.db.models import Q, Prefetch
 from rest_framework import filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -284,111 +283,6 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
             customer.fcm_token = token
             customer.save(update_fields=["fcm_token"])
         return Response({"status": "ok"})
-
-    # -----------------------------------------------------
-    # Apartment Count
-    # -----------------------------------------------------
-
-    @action(detail=False, methods=["get"], url_path="apartment-count")
-    def apartment_count(self, request):
-        queryset = self.filter_queryset(self.get_queryset())
-
-        company_id = request.query_params.get("company_id")
-        if company_id:
-            queryset = queryset.filter(company_id=company_id)
-
-        data = (
-            queryset
-            .exclude(apartment_name__isnull=True)
-            .exclude(apartment_name="")
-            .exclude(block_no__isnull=True)
-            .exclude(block_no="")
-            .exclude(flat_no__isnull=True)
-            .exclude(flat_no="")
-            .annotate(apartment_name_upper=Upper("apartment_name"))
-            .values("apartment_name_upper")
-            .annotate(
-                user_count=Count("unique_id"),
-                block_count=Count("block_no", distinct=True),
-                flat_count=Count("unique_id"),
-            )
-            .order_by("apartment_name_upper")
-        )
-
-        response_data = []
-
-        for item in data:
-            apartment_name = item["apartment_name_upper"]
-
-            qr_url = get_or_create_apartment_qr(apartment_name,company_id,request)
-
-            if qr_url:
-                qr_url = request.build_absolute_uri(qr_url)
-
-            response_data.append({
-                "apartment_name": apartment_name,
-                "user_count": item["user_count"],
-                "block_count": item["block_count"],
-                "flat_count": item["flat_count"],
-                "qr_code": qr_url,
-            })
-
-        return Response(response_data)
-
-    # -----------------------------------------------------
-    # Block Count
-    # -----------------------------------------------------
-
-    @action(detail=False, methods=["get"], url_path="block-count")
-    def block_count(self, request):
-        apartment_name = request.query_params.get("apartment_name")
-
-        if not apartment_name:
-            return Response({"error": "apartment_name is required"}, status=400)
-
-        queryset = self.filter_queryset(self.get_queryset()).filter(
-            apartment_name__iexact=apartment_name.strip()
-        )
-
-        data = (
-            queryset.exclude(block_no__isnull=True)
-            .exclude(block_no="")
-            .values("block_no")
-            .annotate(flat_count=Count("unique_id"))
-            .order_by("block_no")
-        )
-
-        return Response(list(data))
-
-    # -----------------------------------------------------
-    # Flat Count
-    # -----------------------------------------------------
-
-    @action(detail=False, methods=["get"], url_path="flat-count")
-    def flat_count(self, request):
-        apartment_name = request.query_params.get("apartment_name")
-        block = request.query_params.get("block")
-
-        if not apartment_name or not block:
-            return Response(
-                {"error": "apartment_name and block are required"},
-                status=400
-            )
-
-        queryset = self.filter_queryset(self.get_queryset()).filter(
-            apartment_name__iexact=apartment_name.strip(),
-            block_no__iexact=block.strip()
-        )
-
-        data = (
-            queryset.exclude(flat_no__isnull=True)
-            .exclude(flat_no="")
-            .values("flat_no")
-            .annotate(user_count=Count("unique_id"))
-            .order_by("flat_no")
-        )
-
-        return Response(list(data))
 
     # -----------------------------------------------------
     # Property User Count

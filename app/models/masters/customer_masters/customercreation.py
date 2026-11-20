@@ -402,10 +402,18 @@ class CustomerCreation(BaseMaster):
 
     def save(self, *args, **kwargs):
 
+        # A customer that exceeds any configured bulk-waste threshold must
+        # always be classified as a bulk waste generator. This repeats the
+        # client-side convenience rule so imports and API clients cannot
+        # bypass it.
         if exceeds_bulk_waste_threshold(
             self.sqft, self.water_consumption_lpd, self.waste_collection_kg_per_day
         ):
             self.is_bulkwaste_generator = True
+            if kwargs.get("update_fields") is not None:
+                kwargs["update_fields"] = list(
+                    set(kwargs["update_fields"]) | {"is_bulkwaste_generator"}
+                )
 
         if self.block_no:
             self.block_no = self.block_no.upper()

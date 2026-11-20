@@ -159,13 +159,6 @@ class CustomerCreationSerializer(TenancyReadSerializerMixin, serializers.ModelSe
     property_name = serializers.SerializerMethodField(read_only=True)
     sub_property_name = serializers.SerializerMethodField(read_only=True)
 
-    apartment_name = serializers.CharField(required=False, allow_null=True, allow_blank=True)
-    block_no = serializers.CharField(required=False, allow_null=True, allow_blank=True)
-    flat_no = serializers.CharField(required=False, allow_null=True, allow_blank=True)
-    villa_no = serializers.CharField(required=False, allow_null=True, allow_blank=True)
-    industry_name = serializers.CharField(required=False, allow_null=True, allow_blank=True)
-    industry_type = serializers.CharField(required=False, allow_null=True, allow_blank=True)
-
     customer_name = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     contact_no = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     pincode = serializers.CharField(required=False, allow_null=True, allow_blank=True)
@@ -180,7 +173,7 @@ class CustomerCreationSerializer(TenancyReadSerializerMixin, serializers.ModelSe
     sqft = serializers.DecimalField(max_digits=10, decimal_places=2)
 
     group_qr_id = serializers.CharField(read_only=True)
-    is_bulkwaste_generator = serializers.BooleanField(read_only=True)
+    is_bulkwaste_generator = serializers.BooleanField(required=False)
     qr_code = serializers.ImageField(read_only=True)
     member_count = serializers.IntegerField(required=False, allow_null=True, min_value=0)
     family_members = serializers.ListField(
@@ -208,12 +201,6 @@ class CustomerCreationSerializer(TenancyReadSerializerMixin, serializers.ModelSe
             "building_no",
             "street",
             "area",
-            "apartment_name",
-            "block_no",
-            "flat_no",
-            "villa_no",
-            "industry_name",
-            "industry_type",
             "group_qr_id",
             "ward_id",
             "zone_id",

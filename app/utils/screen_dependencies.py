@@ -69,12 +69,6 @@ SCREEN_DEPENDENCIES = {
             "screen-managements/app-modules",
         ),
     },
-    # Its own sidebar page, but it only reads the customer list (and its
-    # apartment-count action) — no screen of its own on the backend router.
-    ("customers", "apartment-list"): {
-        "lookups": ("customer-masters/customercreations",),
-    },
-
     # ---------------- role / staff setup ----------------
     # Staff and contractor user types are two tabs of one page, shown as one
     # "Staff User Type" row (SCREEN_GROUPS below).

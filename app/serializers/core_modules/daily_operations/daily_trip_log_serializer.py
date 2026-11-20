@@ -180,6 +180,7 @@ class DailyTripLogSerializer(TenancyReadSerializerMixin, serializers.ModelSerial
     bins = serializers.SerializerMethodField(read_only=True)
     verified_by_name = serializers.SerializerMethodField(read_only=True)
     collection_status = serializers.SerializerMethodField(read_only=True)
+    collection_type = serializers.SerializerMethodField(read_only=True)
     household_collections = serializers.SerializerMethodField(read_only=True)
     waste_type_breakdown = serializers.SerializerMethodField(read_only=True)
     capture_images = serializers.SerializerMethodField(read_only=True)
@@ -231,6 +232,7 @@ class DailyTripLogSerializer(TenancyReadSerializerMixin, serializers.ModelSerial
             "verified_by_name",
             "verified_at",
             "collection_status",
+            "collection_type",
             "household_collections",
             "waste_type_breakdown",
             "capture_images",
@@ -319,6 +321,18 @@ class DailyTripLogSerializer(TenancyReadSerializerMixin, serializers.ModelSerial
                 if zone else None
             ),
         }
+
+    def get_collection_type(self, obj):
+        assignment = self._assignment(obj)
+        trip_plan = self._trip_plan(assignment)
+        if trip_plan:
+            return trip_plan.collection_type
+        households = self._households(assignment) if assignment else []
+        if any(hh.collection_type == "bulk_waste_collection" for hh in households):
+            return "bulk_waste_collection"
+        if households:
+            return "household_collection"
+        return "bin_collection"
 
     def get_wards_detail(self, obj):
         assignment = self._assignment(obj)
@@ -489,6 +503,7 @@ class DailyTripLogSerializer(TenancyReadSerializerMixin, serializers.ModelSerial
                 "waste_type_breakdown": waste_type_breakdown,
                 "collected_at": hh.collected_at.isoformat() if hh.collected_at else None,
                 "status": hh.status,
+                "collection_type": hh.collection_type,
                 "capture_images": self._household_status_evidence(hh),
             })
         return result

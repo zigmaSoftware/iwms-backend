@@ -34,7 +34,7 @@ def percent(numerator, denominator):
 
 
 def _weight_expression(source):
-    if source == "household":
+    if source in {"household", "bulk"}:
         return Coalesce(
             F("household_collected_weight_kg"),
             Value(0, output_field=DecimalField()),
@@ -122,7 +122,17 @@ def build_waste_collection_report(
     date_filter=None,
 ):
     """Build collection analytics without multiplying trip-level metrics."""
-    source = source if source in {"bin", "household", "all"} else "bin"
+    source = source if source in {"bin", "household", "bulk", "all"} else "bin"
+    if source == "bulk":
+        from app.models.core_modules.daily_operations.daily_trip_household_collection import (
+            DailyTripHouseholdCollection,
+        )
+
+        bulk_assignment_ids = DailyTripHouseholdCollection.objects.filter(
+            collection_type=DailyTripHouseholdCollection.COLLECTION_TYPE_BULK,
+            is_deleted=False,
+        ).values("trip_assignment_id")
+        queryset = queryset.filter(trip_assignment_id__in=bulk_assignment_ids)
     weight_expression = _weight_expression(source)
 
     group_fields = [
@@ -317,7 +327,7 @@ def build_waste_collection_report(
         for assignment_id, info in info_by_assignment.items():
             if assignment_id in classified_ids:
                 continue
-            if source == "household":
+            if source in ("household", "bulk"):
                 weight = info["household_collected_weight_kg"]
             elif source == "all":
                 weight = decimal_value(info["collected_weight_kg"]) + decimal_value(
