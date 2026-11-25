@@ -304,7 +304,6 @@ class Command(BaseCommand):
             "id_no": f"{NAME_PREFIX}-{scope['project_id'][-6:]}-{index:02d}",
             "latitude": f"{lat:.6f}",
             "longitude": f"{lng:.6f}",
-            "apartment_name": "",
             "username": "",
             "password": "",
             "is_bulkwaste_generator": False,

@@ -10,7 +10,7 @@ from app.serializers.superadmin.staff_management.user_serializer import UniqueId
 from app.serializers.evidence_image import absolute_image_url
 from app.utils.name_or_id_field import NameOrUniqueIdField
 from app.utils.related_prefetch import cached_related, prefetch_related_rows, related
-from app.utils.waste_images import capture_images_for_customers
+from app.utils.waste_images import capture_images_for_customers, household_row_images
 from app.utils.waste_type_breakdown import bulk_waste_type_rows_for_trip_assignments
 
 
@@ -469,7 +469,9 @@ class DailyTripLogSerializer(TenancyReadSerializerMixin, serializers.ModelSerial
         if not assignment:
             return []
         result = []
-        for hh in self._households(assignment):
+        households = list(self._households(assignment))
+        row_images = household_row_images(households, self.context.get("request"))
+        for hh in households:
             waste = related(hh, "waste_collection")
             customer = related(hh, "customer") or getattr(waste, "customer", None)
             waste_type_breakdown = []
@@ -504,20 +506,9 @@ class DailyTripLogSerializer(TenancyReadSerializerMixin, serializers.ModelSerial
                 "collected_at": hh.collected_at.isoformat() if hh.collected_at else None,
                 "status": hh.status,
                 "collection_type": hh.collection_type,
-                "capture_images": self._household_status_evidence(hh),
+                "capture_images": row_images.get(hh.unique_id, []),
             })
         return result
-
-    def _household_status_evidence(self, household):
-        url = absolute_image_url(self, household.status_evidence_image)
-        if not url:
-            return []
-        return [{
-            "url": url,
-            "household_collection_id": household.unique_id,
-            "trip_household_collection_id": household.unique_id,
-            "image_type": "status_evidence",
-        }]
 
     def get_capture_images(self, obj):
         """Capture photos taken during this trip — aggregated by matching every
@@ -536,7 +527,9 @@ class DailyTripLogSerializer(TenancyReadSerializerMixin, serializers.ModelSerial
             )
             for hh in self._households(assignment)
         ]
-        for household_images in capture_images_for_customers(pairs, request):
+        households = list(self._households(assignment))
+        web_images = list(household_row_images(households, request).values())
+        for household_images in web_images + capture_images_for_customers(pairs, request):
             for img in household_images:
                 if img["url"] not in seen:
                     seen.add(img["url"])

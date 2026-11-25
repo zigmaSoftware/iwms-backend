@@ -239,6 +239,15 @@ class TripPlanSerializer(TenancyReadSerializerMixin, serializers.ModelSerializer
         "matching customer in the plan's ward/panchayat scope).",
     )
 
+    include_with_qr = serializers.BooleanField(
+        required=False,
+        help_text="Household collection only: include customers created With QR.",
+    )
+    include_without_qr = serializers.BooleanField(
+        required=False,
+        help_text="Household collection only: include customers created Without QR.",
+    )
+
     is_auto_assign = serializers.BooleanField(required=False)
     repeat_days = serializers.ListField(
         child=serializers.IntegerField(min_value=0, max_value=6),
@@ -303,11 +312,13 @@ class TripPlanSerializer(TenancyReadSerializerMixin, serializers.ModelSerializer
             "max_vehicle_capacity_kg",
             "start_time",
             "scheduled_time",
-                "is_auto_assign",
-                "repeat_days",
+            "is_auto_assign",
+            "repeat_days",
             "approval_status",
             "status",
             "collection_type",
+            "include_with_qr",
+            "include_without_qr",
             "collection_points",
             "plan_collection_points",
             "stop_count",
@@ -492,6 +503,8 @@ class TripPlanSerializer(TenancyReadSerializerMixin, serializers.ModelSerializer
                 TripPlanCollectionPoint.COLLECTION_TYPE_BULK,
             }:
                 continue
+            # _customers_for_household_stop already applies the plan's
+            # With QR / Without QR choice.
             customer_ids.update(
                 _customers_for_household_stop(stop, wards=ward_ids)
                 .values_list("unique_id", flat=True)
@@ -566,6 +579,15 @@ class TripPlanSerializer(TenancyReadSerializerMixin, serializers.ModelSerializer
             "collection_type",
             getattr(instance, "collection_type", TripPlan.COLLECTION_TYPE_BIN),
         )
+
+        # Household mode: at least one of With QR / Without QR must be on.
+        if plan_collection_type == TripPlan.COLLECTION_TYPE_HOUSEHOLD:
+            with_qr = attrs.get("include_with_qr", getattr(instance, "include_with_qr", True))
+            without_qr = attrs.get("include_without_qr", getattr(instance, "include_without_qr", True))
+            if not with_qr and not without_qr:
+                raise serializers.ValidationError(
+                    {"include_with_qr": "Select With QR, Without QR, or both."}
+                )
 
         stops = attrs.get("collection_points")
         if stops is not None:

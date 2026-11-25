@@ -22,7 +22,6 @@ from app.models.waste_collection_bluetooth.waste_collection_bluetooth import Was
 from app.serializers.masters.customer_masters.customercreation_serializer import CustomerCreationSerializer
 
 from app.utils.audit_mixin import AuditViewSetMixin
-from app.utils.customer_qr import generate_customer_qr_content, generate_apartment_qr_data
 from app.utils.pagination import LimitOffsetWithPage
 
 
@@ -36,13 +35,6 @@ from app.models.masters.customer_masters.customercreation import CustomerCreatio
 from app.utils.audit_mixin import AuditViewSetMixin
 
 PROPERTY_GROUPING = {
-    "apartment": {
-        "apartment_name_display": "apartment_name",
-        "block_display": "block_no",
-    },
-    "villa": {
-        "villa_number": "villa_no",
-    },
     "individual_house": {
         "building_number": "building_no",
     },
@@ -75,42 +67,10 @@ def _build_dynamic_filter_aliases():
             if model_field.endswith("_no"):
                 aliases[model_field.replace("_no", "_number")] = model_field
 
-    aliases["block"] = "block_no"
-    aliases["apartment_name"] = "apartment_name"
-    aliases["flat_no"] = "flat_no"
-    aliases["villa_no"] = "villa_no"
     aliases["building_no"] = "building_no"
 
     return aliases
-
-
 DYNAMIC_FILTER_ALIASES = _build_dynamic_filter_aliases()
-
-
-
-
-def get_or_create_apartment_qr(apartment_name,company_id,request):
-    apartment_name = (apartment_name or "").strip().upper()
-
-    obj = CustomerCreation.objects.filter(
-        apartment_name__iexact=apartment_name,
-        company_id=company_id,
-        is_deleted=False
-    ).first()
-
-    if not obj:
-        return None
-
-
-    # generate QR
-    qr_data = generate_apartment_qr_data(obj.apartment_unique_id)
-    qr_file = generate_customer_qr_content(qr_data)
-
-    file_name = f"apartment_{apartment_name}.png".replace(" ", "_")
-
-    obj.apartment_qr.save(file_name, qr_file, save=True)
-
-    return obj.apartment_qr.url
 
 
 class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
@@ -122,7 +82,7 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     pagination_class = LimitOffsetWithPage
     search_fields = [
-        "customer_id", "customer_name", "contact_no", "apartment_name", "flat_no",
+        "customer_id", "customer_name", "contact_no",
     ]
     ordering_fields = ["customer_id", "customer_name", "is_active"]
 
@@ -177,18 +137,15 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
                     waste_type_filter |= Q(waste_type_ids__icontains=waste_type_id)
                 queryset = queryset.filter(waste_type_filter)
 
+        is_without_qr = self.request.query_params.get("is_without_qr")
+        if is_without_qr is not None:
+            queryset = queryset.filter(is_without_qr=is_without_qr.lower() == "true")
+
         return queryset
     
 
     def perform_create(self, serializer):
         instance = serializer.save()
-
-        if instance.apartment_name:
-            get_or_create_apartment_qr(
-                instance.apartment_name,
-                instance.company_id,
-                self.request
-            )
 
         new_data = self._serialize_instance(instance)
 
@@ -204,13 +161,6 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
         previous_data = self._serialize_instance(serializer.instance)
 
         instance = serializer.save()
-
-        if instance.apartment_name:
-            get_or_create_apartment_qr(
-                instance.apartment_name,
-                instance.company_id,
-                self.request
-            )
 
         new_data = self._serialize_instance(instance)
 
@@ -350,9 +300,6 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
                 "contact_no": obj.contact_no,
             }
 
-            if obj.flat_no:
-                user_data["flat_no"] = obj.flat_no
-
             grouped_data[group_key]["users"].append(user_data)
             grouped_data[group_key]["user_count"] += 1
 
@@ -475,10 +422,6 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
                     project=project,
                 )
 
-                apartment_name = clean(row.get("apartment_name"))
-                block_no = clean(row.get("block_no"))
-                flat_no = clean(row.get("flat_no"))
-
                 # ✅ Only House No (building_no) and Sqft are mandatory for bulk upload.
                 building_no = clean(row.get("building_no"))
                 sqft = clean(row.get("sqft"))
@@ -516,10 +459,6 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
                     "street": clean(row.get("street")),
                     "area": clean(row.get("area")),
 
-                    "apartment_name": apartment_name or None,
-                    "block_no": block_no or None,
-                    "flat_no": flat_no or None,
-
                     "ward_id": ward.unique_id if ward else None,
                     "zone_id": zone.unique_id if zone else None,
                     "city_id": city.unique_id if city else None,
@@ -548,14 +487,6 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
 
                 if serializer.is_valid():
                     instance = serializer.save()
-
-                    # 🔥 FIX: QR GENERATED HERE
-                    if instance.apartment_name:
-                        get_or_create_apartment_qr(
-                            instance.apartment_name,
-                            instance.company_id,
-                            request
-                        )
 
                     success_count += 1
                 else:

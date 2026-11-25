@@ -1,3 +1,7 @@
+import re
+
+from django.db import transaction
+from django.db.models import Q
 from rest_framework import serializers
 
 from app.models.superadmin.common_masters.country import Country
@@ -31,6 +35,34 @@ RESIDENTIAL_SUB_PROPERTY_KEYWORDS = (
     "villa",
     "townhouse",
 )
+
+BULK_WITHOUT_QR_FIELDS = {
+    "customer_name",
+    "contact_no",
+    "building_no",
+    "street",
+    "area",
+    "pincode",
+    "latitude",
+    "longitude",
+    "sqft",
+    "water_consumption_lpd",
+    "waste_collection_kg_per_day",
+    "id_proof_type",
+    "id_no",
+}
+
+# "Customer-N" numbering restarts for every distinct combination of these
+# address fields (within the same company + project).
+WITHOUT_QR_ADDRESS_SCOPE_FIELDS = (
+    "state_id",
+    "district_id",
+    "city_id",
+    "zone_id",
+    "panchayat_id",
+    "ward_id",
+)
+
 
 # The model's accessors (`obj.ward`, `obj.project`, ...) each run their own
 # query — ~12 per row; lists resolve them in one query per table instead.
@@ -147,6 +179,12 @@ class CustomerCreationSerializer(TenancyReadSerializerMixin, serializers.ModelSe
         write_only=True,
     )
     waste_types = serializers.SerializerMethodField(read_only=True)
+    count = serializers.IntegerField(
+        required=False,
+        min_value=1,
+        max_value=999,
+        help_text="Number of households for bulk without-QR creation",
+    )
     # Local-body emblem for the project, printed on the customer QR sticker.
     project_logo = serializers.SerializerMethodField(read_only=True)
     panchayat_name = serializers.SerializerMethodField(read_only=True)
@@ -169,8 +207,14 @@ class CustomerCreationSerializer(TenancyReadSerializerMixin, serializers.ModelSe
     street = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     area = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
-    building_no = serializers.CharField()
-    sqft = serializers.DecimalField(max_digits=10, decimal_places=2)
+    # Not required at the field level: Without QR customers have no
+    # building_no / sqft. validate() still enforces both for With QR.
+    building_no = serializers.CharField(
+        required=False, allow_null=True, allow_blank=True
+    )
+    sqft = serializers.DecimalField(
+        max_digits=10, decimal_places=2, required=False, allow_null=True
+    )
 
     group_qr_id = serializers.CharField(read_only=True)
     is_bulkwaste_generator = serializers.BooleanField(required=False)
@@ -241,7 +285,9 @@ class CustomerCreationSerializer(TenancyReadSerializerMixin, serializers.ModelSe
             "property_name",
             "sub_property_name",
             "is_bulkwaste_generator",
+            "is_without_qr",
             "qr_code",
+            "count",
         ]
         read_only_fields = ["unique_id", "customer_id", "password_crt_date", "created_at"]
         validators = []
@@ -252,14 +298,79 @@ class CustomerCreationSerializer(TenancyReadSerializerMixin, serializers.ModelSe
         data['password'] = decrypt_password(instance.password or "")
         return data
 
-        # =============================
+    # =============================
     # CREATE (ENCRYPT PASSWORD)
     # =============================
+    WITHOUT_QR_NAME_PREFIX = "Customer-"
+
+    @staticmethod
+    def _scope_q(field, value):
+        """Match `field == value`; an empty value matches both NULL and ""."""
+        if value:
+            return Q(**{field: value})
+        return Q(**{f"{field}__isnull": True}) | Q(**{field: ""})
+
+    def _next_without_qr_number(self, validated_data):
+        """Next free N for "Customer-N" within the same address.
+
+        The sequence is per company + project + state + district + city +
+        zone + panchayat + ward, so every distinct address starts again at
+        Customer-1. Soft-deleted rows are included so a name is never
+        reused. Gaps are left alone: the next batch starts after the highest
+        existing number for that address.
+        """
+        pattern = re.compile(rf"^{re.escape(self.WITHOUT_QR_NAME_PREFIX)}(\d+)$")
+
+        scope = (
+            self._scope_q("company_id", validated_data.get("company_id"))
+            & self._scope_q("project_id", validated_data.get("project_id"))
+        )
+        for field in WITHOUT_QR_ADDRESS_SCOPE_FIELDS:
+            scope &= self._scope_q(field, validated_data.get(field))
+
+        names = CustomerCreation.objects.filter(
+            scope,
+            customer_name__startswith=self.WITHOUT_QR_NAME_PREFIX,
+        ).values_list("customer_name", flat=True)
+
+        highest = 0
+        for name in names:
+            match = pattern.match(name or "")
+            if match:
+                highest = max(highest, int(match.group(1)))
+        return highest + 1
+
+    def _create_without_qr_batch(self, validated_data, count):
+        """Create `count` customers named Customer-N, Customer-N+1, ...
+
+        Numbering is per address (see _next_without_qr_number).
+        All rows or none (single transaction). Returns the first created
+        record, which is what the API response shows.
+        """
+        with transaction.atomic():
+            start = self._next_without_qr_number(validated_data)
+            first = None
+            for offset in range(count):
+                row_data = dict(validated_data)
+                row_data["customer_name"] = (
+                    f"{self.WITHOUT_QR_NAME_PREFIX}{start + offset}"
+                )
+                instance = super().create(row_data)
+                if first is None:
+                    first = instance
+        return first
+
     def create(self, validated_data):
+        count = validated_data.pop("count", None)
         password = validated_data.pop("password", None)
         waste_types = validated_data.pop("waste_type_ids", None)
         if waste_types is not None:
             validated_data["waste_type_ids"] = ",".join(w.unique_id for w in waste_types)
+
+        if validated_data.get("is_without_qr", False):
+            # Without QR: `count` is the number of customers to create, not a
+            # per-record value, so member_count is left untouched.
+            return self._create_without_qr_batch(validated_data, count or 1)
 
         instance = super().create(validated_data)
 
@@ -318,13 +429,21 @@ class CustomerCreationSerializer(TenancyReadSerializerMixin, serializers.ModelSe
         #             {"detail": "Customer with the same name and mobile already exists."}
         #         )
 
-        building_no = attrs.get("building_no", getattr(instance, "building_no", None))
-        if not building_no:
-            raise serializers.ValidationError({"building_no": "Building/House number is required."})
+        # Fall back to the saved value so a partial update that omits
+        # is_without_qr keeps the record's current mode.
+        is_without_qr = attrs.get(
+            "is_without_qr",
+            getattr(instance, "is_without_qr", False),
+        )
 
-        sqft = attrs.get("sqft", getattr(instance, "sqft", None))
-        if sqft is None:
-            raise serializers.ValidationError({"sqft": "Sqft is required."})
+        if not is_without_qr:
+            building_no = attrs.get("building_no", getattr(instance, "building_no", None))
+            if not building_no:
+                raise serializers.ValidationError({"building_no": "Building/House number is required."})
+
+            sqft = attrs.get("sqft", getattr(instance, "sqft", None))
+            if sqft is None:
+                raise serializers.ValidationError({"sqft": "Sqft is required."})
 
         # property_id/sub_property_id in attrs are plain unique_id strings
         # (NameOrUniqueIdField resolves to the slug, not the instance, since
