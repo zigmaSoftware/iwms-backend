@@ -117,7 +117,7 @@ def bulk_waste_type_rows_for_trip_assignments(
                 row["total_weight"],
             )
 
-    if source in ("household", "all"):
+    if source in ("household", "bulk", "all"):
         group_fields = [
             "trip_assignment_id",
         ]

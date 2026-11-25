@@ -20,12 +20,16 @@ from datetime import date, time
 
 import pytest
 from decimal import Decimal
+from rest_framework.exceptions import ValidationError
 
 from app.models.masters.waste_masters.bins import Bins
 from app.models.masters.customer_masters.customercreation import CustomerCreation
 from app.models.core_modules.daily_operations.wastecollection import WasteCollection
 from app.models.masters.panchayat import Panchayat
 from app.models.core_modules.daily_operations.bin_collection_event import BinCollectionEvent
+from app.serializers.core_modules.daily_operations.bin_collection_event_serializer import (
+    BinCollectionEventSerializer,
+)
 from app.models.core_modules.schedule_setup.collection_point import Collection_point
 from app.models.core_modules.daily_operations.daily_trip_assignment import DailyTripAssignment
 from app.models.core_modules.daily_operations.daily_trip_collection_point import DailyTripCollectionPoint
@@ -371,6 +375,57 @@ class TestDailyTripHouseholdCollectionStatus:
 
 @pytest.mark.django_db
 class TestBinCollectionEventGeoAndStatus:
+    def test_gps_coordinates_are_required_for_a_manual_event(self):
+        serializer = BinCollectionEventSerializer(
+            instance=BinCollectionEvent(status=BinCollectionEvent.STATUS_COLLECTED),
+            partial=True,
+        )
+
+        with pytest.raises(ValidationError) as error:
+            serializer.validate({})
+
+        assert error.value.detail == {
+            "driver_latitude": "Capture latitude is required.",
+            "driver_longitude": "Capture longitude is required.",
+        }
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("driver_latitude", Decimal("90.000001")),
+            ("driver_longitude", Decimal("180.000001")),
+        ],
+    )
+    def test_gps_coordinate_outside_valid_range_is_rejected(self, field, value):
+        serializer = BinCollectionEventSerializer()
+
+        with pytest.raises(ValidationError) as error:
+            getattr(serializer, f"validate_{field}")(value)
+
+        assert "must be between" in str(error.value)
+
+    def test_gps_location_outside_collection_point_geofence_is_rejected(
+        self, assignment, collection_point, bin_obj,
+    ):
+        stop = DailyTripCollectionPoint.objects.create(
+            trip_assignment_id=assignment.unique_id,
+            collection_point_id=collection_point.unique_id,
+            bin_id=bin_obj.unique_id,
+        )
+        serializer = BinCollectionEventSerializer()
+
+        with pytest.raises(ValidationError) as error:
+            serializer.validate({
+                "trip_assignment_id": assignment.unique_id,
+                "trip_collection_point_id": stop.unique_id,
+                "bin_id": bin_obj.unique_id,
+                # About 111 m north of this collection point (limit: 10 m).
+                "driver_latitude": Decimal("13.083700"),
+                "driver_longitude": Decimal("80.270700"),
+            })
+
+        assert "within 10 m" in str(error.value.detail["driver_latitude"])
+
     def test_geo_copied_from_trip_assignment(
         self, assignment, collection_point, bin_obj, waste_type_obj, ward, zone, panchayat,
     ):

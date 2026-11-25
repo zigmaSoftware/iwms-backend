@@ -9,6 +9,7 @@ from app.serializers.company_projects.tenancy import TenancyReadSerializerMixin
 from app.serializers.superadmin.staff_management.user_serializer import UniqueIdOrPkField
 from app.serializers.evidence_image import EvidenceImageField, absolute_image_url
 from app.utils.related_prefetch import prefetch_related_rows, related
+from app.utils.waste_images import household_row_images
 
 
 def _household_lookups():
@@ -41,6 +42,10 @@ class DailyTripHouseholdCollectionListSerializer(serializers.ListSerializer):
         prefetch_related_rows(
             related_rows["trip_assignment"].values(), {"trip_plan": (TripPlan, "trip_plan_id")},
         )
+        # All rows' photos in a handful of queries instead of per row.
+        images = household_row_images(rows, self.context.get("request"))
+        for row in rows:
+            row._capture_images_cache = images.get(row.unique_id, [])
         return super().to_representation(rows)
 
 
@@ -63,6 +68,8 @@ class DailyTripHouseholdCollectionSerializer(
     ward = serializers.SerializerMethodField()
     waste_breakdown = serializers.SerializerMethodField()
     status_evidence_image_url = serializers.SerializerMethodField()
+    # Every photo for this stop, each labelled with its waste type.
+    capture_images = serializers.SerializerMethodField()
     status_evidence_image = EvidenceImageField(
         required=False, allow_null=True, write_only=True
     )
@@ -97,6 +104,7 @@ class DailyTripHouseholdCollectionSerializer(
             "status_longitude",
             "status_evidence_image",
             "status_evidence_image_url",
+            "capture_images",
             "customer_available_at",
             "customer_available_note",
             "created_at",
@@ -141,6 +149,12 @@ class DailyTripHouseholdCollectionSerializer(
             "trip_plan_id": assignment.trip_plan_id,
             "trip_plan_display_code": getattr(trip_plan, "display_code", None),
         }
+
+    def get_capture_images(self, obj):
+        cached = obj.__dict__.get("_capture_images_cache")
+        if cached is not None:
+            return cached
+        return household_row_images([obj], self.context.get("request")).get(obj.unique_id, [])
 
     def get_status_evidence_image_url(self, obj):
         return absolute_image_url(self, obj.status_evidence_image)

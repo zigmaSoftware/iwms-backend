@@ -93,3 +93,137 @@ def capture_images_for_customers(pairs, request=None):
             subs = [sub for sub in subs if start <= sub.date_time <= end]
         results.append(_image_rows(subs, request))
     return results
+
+
+# Waste fields on WasteCollection that can carry a per-waste-type photo from
+# the web Household Collections form. Stored as WasteCollectionSub rows with
+# screen_unique_id = WasteCollection.unique_id and form_unique_id = "web:<field>".
+WEB_WASTE_IMAGE_FIELDS = ("wet_waste", "dry_waste", "mixed_waste", "sanitary_waste")
+
+WEB_WASTE_IMAGE_LABELS = {
+    "wet_waste": "Wet Waste",
+    "dry_waste": "Dry Waste",
+    "mixed_waste": "Mixed Waste",
+    "sanitary_waste": "Sanitary Waste",
+}
+
+
+def web_waste_images_for_collections(collection_ids, request=None):
+    """Per-waste-type photos uploaded from the web form, keyed by
+    WasteCollection.unique_id (one query for all ids)."""
+    from app.models.waste_collection_bluetooth.waste_collection_bluetooth import WasteCollectionSub
+
+    ids = [cid for cid in collection_ids if cid]
+    result = {}
+    if not ids:
+        return result
+    subs = (
+        WasteCollectionSub.objects.filter(
+            screen_unique_id__in=ids,
+            form_unique_id__startswith="web:",
+            is_deleted=False,
+        )
+        .exclude(image__isnull=True)
+        .exclude(image="")
+        .order_by("date_time")
+    )
+    for sub in subs:
+        url = build_media_url(sub.image, request)
+        if not url:
+            continue
+        field = sub.form_unique_id.split(":", 1)[1]
+        result.setdefault(sub.screen_unique_id, []).append({
+            "url": url,
+            "field": field,
+            "waste_type_id": sub.waste_type_id,
+            "waste_type_name": WEB_WASTE_IMAGE_LABELS.get(field, field),
+        })
+    return result
+
+
+def _waste_type_names(waste_type_ids):
+    from app.models.waste_collection_bluetooth.waste_collection_bluetooth import WasteType
+
+    ids = {wid for wid in waste_type_ids if wid}
+    if not ids:
+        return {}
+    return dict(
+        WasteType.objects.filter(unique_id__in=ids).values_list("unique_id", "waste_type_name")
+    )
+
+
+def _file_url(image_field, request=None):
+    """Same as serializers.evidence_image.absolute_image_url, without a serializer."""
+    if not image_field:
+        return None
+    try:
+        url = image_field.url
+    except (ValueError, AttributeError):
+        return None
+    return request.build_absolute_uri(url) if request is not None else url
+
+
+def household_row_images(households, request=None):
+    """Every photo for each DailyTripHouseholdCollection row, labelled with
+    its waste type, keyed by the row's unique_id.
+
+    Order: per-waste-type photos from the web form, then mobile capture
+    photos (customer + collection day), then the single photo stored on the
+    WasteCollection (only when there are no per-waste photos — the mobile
+    bridge copies one of its own photos there), then status evidence.
+    """
+    from app.models.core_modules.daily_operations.wastecollection import WasteCollection
+
+    households = list(households)
+    waste_ids = [hh.waste_collection_id for hh in households if getattr(hh, "waste_collection_id", None)]
+    wastes = {
+        w.unique_id: w
+        for w in WasteCollection.objects.filter(unique_id__in=waste_ids)
+    } if waste_ids else {}
+
+    web_by_waste = web_waste_images_for_collections(list(wastes.keys()), request)
+
+    pairs = []
+    for hh in households:
+        waste = wastes.get(getattr(hh, "waste_collection_id", None))
+        day = getattr(waste, "collection_date", None)
+        if day is None and getattr(hh, "collected_at", None):
+            day = hh.collected_at.date()
+        pairs.append((hh.customer_id, day) if day else (None, None))
+    mobile_lists = capture_images_for_customers(pairs, request)
+
+    names = _waste_type_names(
+        img.get("waste_type_id") for images in mobile_lists for img in images
+    )
+
+    result = {}
+    for hh, mobile in zip(households, mobile_lists):
+        waste = wastes.get(getattr(hh, "waste_collection_id", None))
+        base = {
+            "household_collection_id": hh.unique_id,
+            "trip_household_collection_id": hh.unique_id,
+        }
+        images, seen = [], set()
+
+        def add(img):
+            if img["url"] and img["url"] not in seen:
+                seen.add(img["url"])
+                images.append({**img, **base})
+
+        for img in web_by_waste.get(getattr(waste, "unique_id", None), []):
+            add({**img, "image_type": "collection"})
+        for img in mobile:
+            add({
+                **img,
+                "waste_type_name": names.get(img.get("waste_type_id")),
+                "image_type": "collection",
+            })
+        if not images and waste is not None:
+            url = build_media_url(getattr(waste, "image", None), request)
+            if url:
+                add({"url": url, "waste_type_name": None, "image_type": "collection"})
+        evidence_url = _file_url(getattr(hh, "status_evidence_image", None), request)
+        if evidence_url:
+            add({"url": evidence_url, "waste_type_name": None, "image_type": "status_evidence"})
+        result[hh.unique_id] = images
+    return result

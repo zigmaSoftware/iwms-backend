@@ -2,8 +2,7 @@ import re
 import csv
 import io
 
-from django.db.models import Q, Count, Prefetch
-from django.db.models.functions import Upper
+from django.db.models import Q, Prefetch
 from rest_framework import filters, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -23,7 +22,6 @@ from app.models.waste_collection_bluetooth.waste_collection_bluetooth import Was
 from app.serializers.masters.customer_masters.customercreation_serializer import CustomerCreationSerializer
 
 from app.utils.audit_mixin import AuditViewSetMixin
-from app.utils.customer_qr import generate_customer_qr_content, generate_apartment_qr_data
 from app.utils.pagination import LimitOffsetWithPage
 
 
@@ -37,13 +35,6 @@ from app.models.masters.customer_masters.customercreation import CustomerCreatio
 from app.utils.audit_mixin import AuditViewSetMixin
 
 PROPERTY_GROUPING = {
-    "apartment": {
-        "apartment_name_display": "apartment_name",
-        "block_display": "block_no",
-    },
-    "villa": {
-        "villa_number": "villa_no",
-    },
     "individual_house": {
         "building_number": "building_no",
     },
@@ -76,42 +67,10 @@ def _build_dynamic_filter_aliases():
             if model_field.endswith("_no"):
                 aliases[model_field.replace("_no", "_number")] = model_field
 
-    aliases["block"] = "block_no"
-    aliases["apartment_name"] = "apartment_name"
-    aliases["flat_no"] = "flat_no"
-    aliases["villa_no"] = "villa_no"
     aliases["building_no"] = "building_no"
 
     return aliases
-
-
 DYNAMIC_FILTER_ALIASES = _build_dynamic_filter_aliases()
-
-
-
-
-def get_or_create_apartment_qr(apartment_name,company_id,request):
-    apartment_name = (apartment_name or "").strip().upper()
-
-    obj = CustomerCreation.objects.filter(
-        apartment_name__iexact=apartment_name,
-        company_id=company_id,
-        is_deleted=False
-    ).first()
-
-    if not obj:
-        return None
-
-
-    # generate QR
-    qr_data = generate_apartment_qr_data(obj.apartment_unique_id)
-    qr_file = generate_customer_qr_content(qr_data)
-
-    file_name = f"apartment_{apartment_name}.png".replace(" ", "_")
-
-    obj.apartment_qr.save(file_name, qr_file, save=True)
-
-    return obj.apartment_qr.url
 
 
 class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
@@ -123,7 +82,7 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     pagination_class = LimitOffsetWithPage
     search_fields = [
-        "customer_id", "customer_name", "contact_no", "apartment_name", "flat_no",
+        "customer_id", "customer_name", "contact_no",
     ]
     ordering_fields = ["customer_id", "customer_name", "is_active"]
 
@@ -178,18 +137,15 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
                     waste_type_filter |= Q(waste_type_ids__icontains=waste_type_id)
                 queryset = queryset.filter(waste_type_filter)
 
+        is_without_qr = self.request.query_params.get("is_without_qr")
+        if is_without_qr is not None:
+            queryset = queryset.filter(is_without_qr=is_without_qr.lower() == "true")
+
         return queryset
     
 
     def perform_create(self, serializer):
         instance = serializer.save()
-
-        if instance.apartment_name:
-            get_or_create_apartment_qr(
-                instance.apartment_name,
-                instance.company_id,
-                self.request
-            )
 
         new_data = self._serialize_instance(instance)
 
@@ -205,13 +161,6 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
         previous_data = self._serialize_instance(serializer.instance)
 
         instance = serializer.save()
-
-        if instance.apartment_name:
-            get_or_create_apartment_qr(
-                instance.apartment_name,
-                instance.company_id,
-                self.request
-            )
 
         new_data = self._serialize_instance(instance)
 
@@ -286,111 +235,6 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
         return Response({"status": "ok"})
 
     # -----------------------------------------------------
-    # Apartment Count
-    # -----------------------------------------------------
-
-    @action(detail=False, methods=["get"], url_path="apartment-count")
-    def apartment_count(self, request):
-        queryset = self.filter_queryset(self.get_queryset())
-
-        company_id = request.query_params.get("company_id")
-        if company_id:
-            queryset = queryset.filter(company_id=company_id)
-
-        data = (
-            queryset
-            .exclude(apartment_name__isnull=True)
-            .exclude(apartment_name="")
-            .exclude(block_no__isnull=True)
-            .exclude(block_no="")
-            .exclude(flat_no__isnull=True)
-            .exclude(flat_no="")
-            .annotate(apartment_name_upper=Upper("apartment_name"))
-            .values("apartment_name_upper")
-            .annotate(
-                user_count=Count("unique_id"),
-                block_count=Count("block_no", distinct=True),
-                flat_count=Count("unique_id"),
-            )
-            .order_by("apartment_name_upper")
-        )
-
-        response_data = []
-
-        for item in data:
-            apartment_name = item["apartment_name_upper"]
-
-            qr_url = get_or_create_apartment_qr(apartment_name,company_id,request)
-
-            if qr_url:
-                qr_url = request.build_absolute_uri(qr_url)
-
-            response_data.append({
-                "apartment_name": apartment_name,
-                "user_count": item["user_count"],
-                "block_count": item["block_count"],
-                "flat_count": item["flat_count"],
-                "qr_code": qr_url,
-            })
-
-        return Response(response_data)
-
-    # -----------------------------------------------------
-    # Block Count
-    # -----------------------------------------------------
-
-    @action(detail=False, methods=["get"], url_path="block-count")
-    def block_count(self, request):
-        apartment_name = request.query_params.get("apartment_name")
-
-        if not apartment_name:
-            return Response({"error": "apartment_name is required"}, status=400)
-
-        queryset = self.filter_queryset(self.get_queryset()).filter(
-            apartment_name__iexact=apartment_name.strip()
-        )
-
-        data = (
-            queryset.exclude(block_no__isnull=True)
-            .exclude(block_no="")
-            .values("block_no")
-            .annotate(flat_count=Count("unique_id"))
-            .order_by("block_no")
-        )
-
-        return Response(list(data))
-
-    # -----------------------------------------------------
-    # Flat Count
-    # -----------------------------------------------------
-
-    @action(detail=False, methods=["get"], url_path="flat-count")
-    def flat_count(self, request):
-        apartment_name = request.query_params.get("apartment_name")
-        block = request.query_params.get("block")
-
-        if not apartment_name or not block:
-            return Response(
-                {"error": "apartment_name and block are required"},
-                status=400
-            )
-
-        queryset = self.filter_queryset(self.get_queryset()).filter(
-            apartment_name__iexact=apartment_name.strip(),
-            block_no__iexact=block.strip()
-        )
-
-        data = (
-            queryset.exclude(flat_no__isnull=True)
-            .exclude(flat_no="")
-            .values("flat_no")
-            .annotate(user_count=Count("unique_id"))
-            .order_by("flat_no")
-        )
-
-        return Response(list(data))
-
-    # -----------------------------------------------------
     # Property User Count
     # -----------------------------------------------------
 
@@ -455,9 +299,6 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
                 "customer_name": obj.customer_name,
                 "contact_no": obj.contact_no,
             }
-
-            if obj.flat_no:
-                user_data["flat_no"] = obj.flat_no
 
             grouped_data[group_key]["users"].append(user_data)
             grouped_data[group_key]["user_count"] += 1
@@ -581,10 +422,6 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
                     project=project,
                 )
 
-                apartment_name = clean(row.get("apartment_name"))
-                block_no = clean(row.get("block_no"))
-                flat_no = clean(row.get("flat_no"))
-
                 # ✅ Only House No (building_no) and Sqft are mandatory for bulk upload.
                 building_no = clean(row.get("building_no"))
                 sqft = clean(row.get("sqft"))
@@ -622,10 +459,6 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
                     "street": clean(row.get("street")),
                     "area": clean(row.get("area")),
 
-                    "apartment_name": apartment_name or None,
-                    "block_no": block_no or None,
-                    "flat_no": flat_no or None,
-
                     "ward_id": ward.unique_id if ward else None,
                     "zone_id": zone.unique_id if zone else None,
                     "city_id": city.unique_id if city else None,
@@ -654,14 +487,6 @@ class CustomerCreationViewSet(AuditViewSetMixin, CompanyScopedViewSet):
 
                 if serializer.is_valid():
                     instance = serializer.save()
-
-                    # 🔥 FIX: QR GENERATED HERE
-                    if instance.apartment_name:
-                        get_or_create_apartment_qr(
-                            instance.apartment_name,
-                            instance.company_id,
-                            request
-                        )
 
                     success_count += 1
                 else:

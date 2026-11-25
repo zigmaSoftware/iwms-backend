@@ -95,6 +95,33 @@ class TestCollectionPointSerializerChoices:
         assert serializer.is_valid(), serializer.errors
         assert serializer.validated_data["collection_type"] == "bulk_waste_collection"
 
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("latitude", "90.000001", "Latitude must be between -90 and 90."),
+            ("longitude", "180.000001", "Longitude must be between -180 and 180."),
+        ],
+    )
+    def test_secondary_collection_point_rejects_out_of_range_coordinates(
+        self, company, project, state, district, city, panchayat, field, value, message
+    ):
+        payload = _cp_payload(
+            company,
+            project,
+            state,
+            district,
+            city,
+            panchayat,
+            cp_name="Secondary CP coordinates",
+            collection_type=Collection_point.COLLECTION_TYPE_BIN,
+        )
+        payload[field] = value
+
+        serializer = CollectionPointSerializer(data=payload)
+
+        assert not serializer.is_valid()
+        assert serializer.errors[field] == [message]
+
 
 @pytest.mark.django_db
 class TestCollectionPointLegacyHouseholdRows:

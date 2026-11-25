@@ -68,6 +68,11 @@ class WasteCollection(BaseMaster):
         default=STATUS_PENDING,
     )
 
+    # Device position captured at the point of household collection.  These
+    # are deliberately separate from the customer's registered coordinates.
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+
     # Collection date is now a plain, user-editable field (matching
     # BinCollectionEvent.collection_date) rather than auto-set on creation.
     collection_date = models.DateField(default=None, null=True, blank=True)

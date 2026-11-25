@@ -1,3 +1,6 @@
+from decimal import Decimal
+from math import asin, cos, radians, sin, sqrt
+
 from rest_framework import serializers
 
 from app.models.masters.waste_masters.bins import Bins
@@ -6,6 +9,7 @@ from app.models.core_modules.daily_operations.daily_trip_assignment import Daily
 from app.models.core_modules.daily_operations.daily_trip_collection_point import (
     DailyTripCollectionPoint,
 )
+from app.models.core_modules.schedule_setup.collection_point import Collection_point
 from app.models.core_modules.daily_operations.vehicle_breakdown import VehicleBreakdown
 from app.serializers.masters.waste_masters.bins_serializer import BinsSerializer
 from app.serializers.company_projects.tenancy import TenancyReadSerializerMixin
@@ -24,6 +28,8 @@ from app.serializers.evidence_image import EvidenceImageField, absolute_image_ur
 
 
 class BinCollectionEventSerializer(TenancyReadSerializerMixin, serializers.ModelSerializer):
+    # Keep the same collection geofence used by household waste collection.
+    MAX_COLLECTION_DISTANCE_METERS = 10
     status_evidence_image_url = serializers.SerializerMethodField()
     status_evidence_image = EvidenceImageField(
         required=False, allow_null=True, write_only=True
@@ -136,6 +142,36 @@ class BinCollectionEventSerializer(TenancyReadSerializerMixin, serializers.Model
     def get_status_evidence_image_url(self, obj):
         return absolute_image_url(self, obj.status_evidence_image)
 
+    def validate_driver_latitude(self, value):
+        if not Decimal("-90") <= value <= Decimal("90"):
+            raise serializers.ValidationError(
+                "GPS latitude must be between -90 and 90."
+            )
+        return value
+
+    def validate_driver_longitude(self, value):
+        if not Decimal("-180") <= value <= Decimal("180"):
+            raise serializers.ValidationError(
+                "GPS longitude must be between -180 and 180."
+            )
+        return value
+
+    @staticmethod
+    def _distance_in_meters(from_latitude, from_longitude, to_latitude, to_longitude):
+        """Great-circle distance between two GPS coordinates."""
+        earth_radius_m = 6_371_000
+        latitude_delta = radians(float(to_latitude) - float(from_latitude))
+        longitude_delta = radians(float(to_longitude) - float(from_longitude))
+        origin_latitude = radians(float(from_latitude))
+        destination_latitude = radians(float(to_latitude))
+        haversine = (
+            sin(latitude_delta / 2) ** 2
+            + cos(origin_latitude)
+            * cos(destination_latitude)
+            * sin(longitude_delta / 2) ** 2
+        )
+        return 2 * earth_radius_m * asin(sqrt(haversine))
+
     def validate(self, attrs):
         # trip_assignment_id / trip_collection_point_id / bin_id in attrs are
         # plain unique_id strings (UniqueIdOrPkField.to_internal_value already
@@ -153,22 +189,22 @@ class BinCollectionEventSerializer(TenancyReadSerializerMixin, serializers.Model
 
         status_value = attrs.get("status", getattr(self.instance, "status", None))
         existing_image = getattr(self.instance, "status_evidence_image", None)
+        errors = {}
+        if attrs.get(
+            "driver_latitude", getattr(self.instance, "driver_latitude", None)
+        ) is None:
+            errors["driver_latitude"] = "Capture latitude is required."
+        if attrs.get(
+            "driver_longitude", getattr(self.instance, "driver_longitude", None)
+        ) is None:
+            errors["driver_longitude"] = "Capture longitude is required."
         if status_value == BinCollectionEvent.STATUS_NOT_COLLECTED:
-            errors = {}
             if not attrs.get("status_evidence_image") and not existing_image:
                 errors["status_evidence_image"] = (
                     "A geotagged evidence image is required."
                 )
-            if attrs.get(
-                "driver_latitude", getattr(self.instance, "driver_latitude", None)
-            ) is None:
-                errors["driver_latitude"] = "Capture latitude is required."
-            if attrs.get(
-                "driver_longitude", getattr(self.instance, "driver_longitude", None)
-            ) is None:
-                errors["driver_longitude"] = "Capture longitude is required."
-            if errors:
-                raise serializers.ValidationError(errors)
+        if errors:
+            raise serializers.ValidationError(errors)
 
         trip_cp = (
             DailyTripCollectionPoint.objects.filter(unique_id=trip_cp_id).first()
@@ -181,6 +217,42 @@ class BinCollectionEventSerializer(TenancyReadSerializerMixin, serializers.Model
             attrs["trip_assignment_id"] = assignment_id
             attrs["bin_id"] = bin_id
             attrs["collection_point_id"] = trip_cp.collection_point_id
+
+        # Generic -90..90 / -180..180 checks are not enough: an event must
+        # be captured at its selected collection point. Resolve the point
+        # server-side, rather than trusting a client-supplied coordinate.
+        collection_point_id = attrs.get(
+            "collection_point_id",
+            getattr(self.instance, "collection_point_id", None),
+        )
+        collection_point = (
+            Collection_point.objects.filter(
+                unique_id=collection_point_id, is_deleted=False
+            ).first()
+            if collection_point_id else None
+        )
+        latitude = attrs.get(
+            "driver_latitude", getattr(self.instance, "driver_latitude", None)
+        )
+        longitude = attrs.get(
+            "driver_longitude", getattr(self.instance, "driver_longitude", None)
+        )
+        if collection_point and latitude is not None and longitude is not None:
+            distance = self._distance_in_meters(
+                collection_point.latitude,
+                collection_point.longitude,
+                latitude,
+                longitude,
+            )
+            if distance > self.MAX_COLLECTION_DISTANCE_METERS:
+                raise serializers.ValidationError(
+                    {
+                        "driver_latitude": (
+                            f"Captured location is {distance:.1f} m from the collection point. "
+                            f"It must be within {self.MAX_COLLECTION_DISTANCE_METERS} m."
+                        )
+                    }
+                )
 
         assignment = (
             DailyTripAssignment.objects.filter(unique_id=assignment_id).first()

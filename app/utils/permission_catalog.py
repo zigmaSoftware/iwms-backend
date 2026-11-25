@@ -228,8 +228,6 @@ SECTIONS = (
         module("customers", "Customer Masters", (
             screen("customercreations", "Customer Creation"),
             screen("customer-access-configuration", "Customer App Access"),
-            # Reads the customer list (SCREEN_DEPENDENCIES lookup).
-            screen("apartment-list", "Apartment List", routes=()),
         ), url_module="customer-masters"),
     )),
     ("core-modules", (

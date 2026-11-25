@@ -58,7 +58,7 @@ class TripPlan(BaseMaster):
     zone_id = models.CharField(max_length=30, null=True, blank=True, db_index=True)
     panchayat_id = models.CharField(max_length=30, null=True, blank=True, db_index=True)
     block_panchayat_union_id = models.CharField(max_length=30, null=True, blank=True)
-    
+
     # Store ward IDs as comma-separated string
     ward_ids = models.TextField(blank=True, default="")
 
@@ -84,6 +84,15 @@ class TripPlan(BaseMaster):
         default=COLLECTION_TYPE_BIN,
         db_index=True,
         help_text="One Trip Plan can generate only one category of daily work.",
+    )
+    # Household mode only: which customers are auto-assigned.
+    include_with_qr = models.BooleanField(
+        default=True,
+        help_text="Household collection: include customers created With QR.",
+    )
+    include_without_qr = models.BooleanField(
+        default=True,
+        help_text="Household collection: include customers created Without QR.",
     )
     trip_trigger_weight_kg = models.PositiveIntegerField(
         help_text="Collected weight (kg) that triggers a trip dispatch.",
@@ -184,6 +193,19 @@ class TripPlan(BaseMaster):
 
     def get_waste_type_ids(self):
         return [w for w in self.waste_type_ids_csv.split(",") if w]
+
+    def apply_qr_scope(self, queryset):
+        """Narrow a CustomerCreation queryset by the With QR / Without QR
+        choice. Only household plans use it; other modes are untouched."""
+        if self.collection_type != self.COLLECTION_TYPE_HOUSEHOLD:
+            return queryset
+        if self.include_with_qr and self.include_without_qr:
+            return queryset
+        if self.include_without_qr:
+            return queryset.filter(is_without_qr=True)
+        if self.include_with_qr:
+            return queryset.filter(is_without_qr=False)
+        return queryset.none()
 
     @property
     def company(self):

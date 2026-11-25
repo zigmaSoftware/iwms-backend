@@ -47,35 +47,11 @@ def exceeds_bulk_waste_threshold(sqft, water_consumption_lpd, waste_collection_k
     )
 
 
-def get_or_create_apartment_id(apartment_name, latitude, longitude, company_id):
-    apartment_name = (apartment_name or "").strip().upper()
-
-    from app.models.masters.customer_masters.customercreation import CustomerCreation
-    existing = CustomerCreation.objects.filter(
-        apartment_name__iexact=apartment_name,
-        latitude=latitude,
-        longitude=longitude,
-        company_id=company_id,
-        is_deleted=False
-    ).first()
-
-    if existing and existing.apartment_unique_id:
-        return existing.apartment_unique_id
-
-    return generate_apartment_id()
-
-
 class CustomerCreation(BaseMaster):
     QR_TRIGGER_FIELDS = {
         "customer_name",
         "contact_no",
         "building_no",
-        "apartment_name",
-        "block_no",
-        "flat_no",
-        "villa_no",
-        "industry_name",
-        "industry_type",
         "company_id",
         "project_id",
         "sub_property",
@@ -85,12 +61,6 @@ class CustomerCreation(BaseMaster):
         "customer_name",
         "contact_no",
         "building_no",
-        "apartment_name",
-        "block_no",
-        "flat_no",
-        "villa_no",
-        "industry_name",
-        "industry_type",
         "company_id",
         "project_id",
         "sub_property_id",
@@ -152,29 +122,8 @@ class CustomerCreation(BaseMaster):
     longitude = models.CharField(max_length=100)
 
     # =============================
-    # APARTMENT SUPPORT
+    # INDIVIDUAL HOUSE FIELDS
     # =============================
-    apartment_name = models.CharField(max_length=100, null=True, blank=True)
-    block_no = models.CharField(max_length=20, null=True, blank=True)
-    flat_no = models.CharField(max_length=20, null=True, blank=True)
-
-    apartment_qr = models.ImageField(
-        upload_to="apartment_qr/",
-        blank=True,
-        null=True
-    )
-
-    apartment_unique_id = models.CharField(
-        max_length=50,
-        null=True,
-        blank=True,
-        db_index=True
-    )
-
-    villa_no = models.CharField(max_length=20, null=True, blank=True)
-    industry_name = models.CharField(max_length=100, null=True, blank=True)
-    industry_type = models.CharField(max_length=100, null=True, blank=True)
-
     # COMMON QR GROUP ID
     group_qr_id = models.CharField(max_length=100, null=True, blank=True)
 
@@ -283,6 +232,11 @@ class CustomerCreation(BaseMaster):
     is_superuser = models.BooleanField(default=False)
     is_bulkwaste_generator = models.BooleanField(default=False)
 
+    is_without_qr = models.BooleanField(
+        default=False,
+        help_text="True if customer created without QR code (bulk count based)",
+    )
+
     user_type_id = models.CharField(max_length=30, null=True, blank=True)
     staffusertype_id = models.CharField(max_length=30, null=True, blank=True)
 
@@ -352,11 +306,6 @@ class CustomerCreation(BaseMaster):
         
         if resolve_subproperty_type(sub_property_name) != QR_SUBPROPERTY_APARTMENT:
             return self.unique_id
-
-        apartment_name = (self.apartment_name or "").strip()
-        block_no = (self.block_no or "").strip()
-        if apartment_name and block_no:
-            return f"APT-{apartment_name}-{block_no}"
         return f"APT-{self.unique_id}"
 
     @property
@@ -402,23 +351,24 @@ class CustomerCreation(BaseMaster):
 
     def save(self, *args, **kwargs):
 
+        # A customer that exceeds any configured bulk-waste threshold must
+        # always be classified as a bulk waste generator. This repeats the
+        # client-side convenience rule so imports and API clients cannot
+        # bypass it.
         if exceeds_bulk_waste_threshold(
             self.sqft, self.water_consumption_lpd, self.waste_collection_kg_per_day
         ):
             self.is_bulkwaste_generator = True
-
-        if self.block_no:
-            self.block_no = self.block_no.upper()
-
-
-        if self.apartment_name and self.latitude and self.longitude:
-            if not self.apartment_unique_id:
-                self.apartment_unique_id = get_or_create_apartment_id(
-                    self.apartment_name,
-                    self.latitude,
-                    self.longitude,
-                    self.company_id
+            if kwargs.get("update_fields") is not None:
+                kwargs["update_fields"] = list(
+                    set(kwargs["update_fields"]) | {"is_bulkwaste_generator"}
                 )
+
+        if self.building_no:
+            self.building_no = self.building_no.upper()
+
+
+        
 
         is_create = self._state.adding
         requested_update_fields = kwargs.get("update_fields")
@@ -426,6 +376,9 @@ class CustomerCreation(BaseMaster):
             is_create=is_create,
             update_fields=requested_update_fields,
         )
+
+        if getattr(self, "is_without_qr", False):
+            qr_refresh_required = False
 
         self.group_qr_id = self.generate_group_qr_id()
         if not self.group_qr_id:

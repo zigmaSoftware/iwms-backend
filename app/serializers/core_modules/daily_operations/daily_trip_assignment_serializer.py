@@ -662,6 +662,7 @@ class DailyTripAssignmentSerializer(TenancyReadSerializerMixin, serializers.Mode
             "waste_type_ids": plan.waste_type_ids or ([plan.waste_type_id] if plan.waste_type_id else []),
             "has_bin": TripPlanCollectionPoint.COLLECTION_TYPE_BIN in stop_types,
             "has_household": TripPlanCollectionPoint.COLLECTION_TYPE_HOUSEHOLD in stop_types,
+            "has_bulk": TripPlanCollectionPoint.COLLECTION_TYPE_BULK in stop_types,
         }
 
     @staticmethod
@@ -891,11 +892,12 @@ class DailyTripAssignmentSerializer(TenancyReadSerializerMixin, serializers.Mode
         from app.models.core_modules.schedule_setup.trip_plan_collection_point import TripPlanCollectionPoint
         plan = related(obj, "trip_plan")
         if not plan:
-            return {"has_bin": False, "has_household": False}
+            return {"has_bin": False, "has_household": False, "has_bulk": False}
         stops = self._plan_stop_types(plan)
         return {
             "has_bin": TripPlanCollectionPoint.COLLECTION_TYPE_BIN in stops,
             "has_household": TripPlanCollectionPoint.COLLECTION_TYPE_HOUSEHOLD in stops,
+            "has_bulk": TripPlanCollectionPoint.COLLECTION_TYPE_BULK in stops,
         }
 
     def get_collection_points(self, obj):

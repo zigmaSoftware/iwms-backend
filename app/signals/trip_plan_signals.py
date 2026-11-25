@@ -51,6 +51,14 @@ def _geo_filter_for(obj):
     return None
 
 
+def _apply_plan_qr_scope(trip_plan, queryset):
+    """Household plans only: keep With QR / Without QR customers according
+    to the plan's checkboxes. Other plans/modes are returned unchanged."""
+    if trip_plan is None:
+        return queryset
+    return trip_plan.apply_qr_scope(queryset)
+
+
 def _customers_for_household_stop(stop, wards=None):
     from app.models.masters.customer_masters.customercreation import CustomerCreation
 
@@ -71,12 +79,13 @@ def _customers_for_household_stop(stop, wards=None):
     if not geo_filter:
         ward_ids = list(wards or [])
         if ward_ids:
-            return CustomerCreation.objects.filter(
+            queryset = CustomerCreation.objects.filter(
                 is_deleted=False,
                 is_active=True,
                 is_bulkwaste_generator=is_bulk_stop,
                 ward_id__in=ward_ids,
             )
+            return _apply_plan_qr_scope(trip_plan, queryset)
         return CustomerCreation.objects.none()
 
     field, value = geo_filter
@@ -89,7 +98,7 @@ def _customers_for_household_stop(stop, wards=None):
     ward_ids = list(wards or [])
     if ward_ids:
         queryset = queryset.filter(ward_id__in=ward_ids)
-    return queryset
+    return _apply_plan_qr_scope(trip_plan, queryset)
 
 
 def _create_daily_household_collections(assignment, stop):
@@ -126,8 +135,8 @@ def sync_daily_assignment_stops_from_plan(assignment):
     Uses get_or_create throughout, so it is safe to call repeatedly: it adds
     stops that aren't cloned yet (e.g. stops added to the plan after the
     assignment was first created) and only removes pending household rows that
-    fall outside the selected wards. Collected data is never overwritten.
-    Returns the number of new rows.
+    fall outside the selected wards or the plan's With QR / Without QR choice.
+    Collected data is never overwritten. Returns the number of new rows.
 
     This is the single authoritative "clone stops" code path for IWMS —
     invoked both by the post_save signal below (fires the moment a
@@ -168,6 +177,31 @@ def sync_daily_assignment_stops_from_plan(assignment):
             is_collected=False,
             is_deleted=False,
         ).delete()
+
+    # Household plans: drop still-pending rows for customers the plan's
+    # With QR / Without QR choice no longer includes (e.g. the plan was
+    # edited from "both" to "With QR only").
+    if (
+        plan.collection_type == TripPlan.COLLECTION_TYPE_HOUSEHOLD
+        and not (plan.include_with_qr and plan.include_without_qr)
+    ):
+        from app.models.masters.customer_masters.customercreation import CustomerCreation
+
+        pending_household_rows = DailyTripHouseholdCollection.objects.filter(
+            trip_assignment_id=assignment.unique_id,
+            collection_type=DailyTripHouseholdCollection.COLLECTION_TYPE_HOUSEHOLD,
+            is_collected=False,
+            is_deleted=False,
+        )
+        if not plan.include_with_qr and not plan.include_without_qr:
+            pending_household_rows.delete()
+        else:
+            # With QR only  -> drop Without QR customers (is_without_qr=True)
+            # Without QR only -> drop With QR customers (is_without_qr=False)
+            excluded_customer_ids = CustomerCreation.objects.filter(
+                is_without_qr=plan.include_with_qr
+            ).values_list("unique_id", flat=True)
+            pending_household_rows.filter(customer_id__in=excluded_customer_ids).delete()
 
     added = 0
     for stop in plan_stops:
