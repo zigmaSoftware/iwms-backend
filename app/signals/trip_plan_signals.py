@@ -85,7 +85,7 @@ def _customers_for_household_stop(stop, wards=None):
                 is_bulkwaste_generator=is_bulk_stop,
                 ward_id__in=ward_ids,
             )
-            return _apply_plan_qr_scope(trip_plan, queryset)
+            return _apply_plan_qr_scope(trip_plan, queryset) if not is_bulk_stop else queryset
         return CustomerCreation.objects.none()
 
     field, value = geo_filter
@@ -98,10 +98,15 @@ def _customers_for_household_stop(stop, wards=None):
     ward_ids = list(wards or [])
     if ward_ids:
         queryset = queryset.filter(ward_id__in=ward_ids)
-    return _apply_plan_qr_scope(trip_plan, queryset)
+    return _apply_plan_qr_scope(trip_plan, queryset) if not is_bulk_stop else queryset
 
 
-def _create_daily_household_collections(assignment, stop):
+def _create_daily_household_collections(assignment, stop, start_sequence=None):
+    """Expand one household/bulk plan stop into per-customer daily rows.
+
+    Customers are numbered from `start_sequence` (the running route position
+    across all stop types) so they don't clash with the stops that follow.
+    Returns (rows_created, customers_in_stop)."""
     from app.models.core_modules.daily_operations.daily_trip_household_collection import (
         DailyTripHouseholdCollection,
     )
@@ -113,20 +118,22 @@ def _create_daily_household_collections(assignment, stop):
     )
     created_count = 0
     ward_ids = [ward_id for ward_id in (assignment.ward_ids or "").split(",") if ward_id]
-    for offset, customer in enumerate(_customers_for_household_stop(stop, wards=ward_ids), start=0):
+    first_sequence = stop.sequence if start_sequence is None else start_sequence
+    customers = list(_customers_for_household_stop(stop, wards=ward_ids).order_by("pk"))
+    for offset, customer in enumerate(customers, start=0):
         _, created = DailyTripHouseholdCollection.objects.get_or_create(
             trip_assignment_id=assignment.unique_id,
             customer_id=customer.unique_id,
             collection_type=collection_type,
             defaults={
-                "sequence": stop.sequence + offset,
+                "sequence": first_sequence + offset,
                 "is_collected": False,
                 "status": DailyTripHouseholdCollection.STATUS_PENDING,
             },
         )
         if created:
             created_count += 1
-    return created_count
+    return created_count, len(customers)
 
 
 def sync_daily_assignment_stops_from_plan(assignment):
@@ -153,11 +160,11 @@ def sync_daily_assignment_stops_from_plan(assignment):
     plan = TripPlan.objects.filter(unique_id=assignment.trip_plan_id).first()
     if not plan:
         return 0
+    # Stop rows, rather than the legacy plan-level collection_type, determine
+    # the work cloned into a daily trip.  This preserves mixed collection
+    # plans (secondary/bin + household + bulk in one route).
     plan_stops = TripPlanCollectionPoint.objects.filter(
-        trip_plan_id=plan.unique_id,
-        collection_type=plan.collection_type,
-        is_active=True,
-        is_deleted=False,
+        trip_plan_id=plan.unique_id, is_active=True, is_deleted=False,
     ).order_by("sequence")
 
     from app.models.core_modules.daily_operations.daily_trip_household_collection import (
@@ -182,8 +189,7 @@ def sync_daily_assignment_stops_from_plan(assignment):
     # With QR / Without QR choice no longer includes (e.g. the plan was
     # edited from "both" to "With QR only").
     if (
-        plan.collection_type == TripPlan.COLLECTION_TYPE_HOUSEHOLD
-        and not (plan.include_with_qr and plan.include_without_qr)
+        not (plan.include_with_qr and plan.include_without_qr)
     ):
         from app.models.masters.customer_masters.customercreation import CustomerCreation
 
@@ -204,16 +210,27 @@ def sync_daily_assignment_stops_from_plan(assignment):
             pending_household_rows.filter(customer_id__in=excluded_customer_ids).delete()
 
     added = 0
+    # Number daily stops continuously in route order across all collection
+    # types: a household/bulk plan stop expands into one row per customer,
+    # so later stops shift down instead of reusing the same numbers.
+    # Bins at the same collection point are one physical stop, so they share
+    # that collection point's number.
+    next_sequence = 1
+    collection_point_sequence = {}
     for stop in plan_stops:
         if stop.collection_type == TripPlanCollectionPoint.COLLECTION_TYPE_BIN:
             if not stop.collection_point_id or not stop.bin_id:
                 continue
+            if stop.collection_point_id not in collection_point_sequence:
+                collection_point_sequence[stop.collection_point_id] = next_sequence
+                next_sequence += 1
+            bin_sequence = collection_point_sequence[stop.collection_point_id]
             _, created = DailyTripCollectionPoint.objects.get_or_create(
                 trip_assignment_id=assignment.unique_id,
                 collection_point_id=stop.collection_point_id,
                 bin_id=stop.bin_id,
                 defaults={
-                    "sequence": stop.sequence,
+                    "sequence": bin_sequence,
                     "is_collected": False,
                     "status": DailyTripCollectionPoint.STATUS_PENDING,
                     "created_by_id": getattr(assignment, "created_by_id", None),
@@ -226,7 +243,11 @@ def sync_daily_assignment_stops_from_plan(assignment):
             TripPlanCollectionPoint.COLLECTION_TYPE_HOUSEHOLD,
             TripPlanCollectionPoint.COLLECTION_TYPE_BULK,
         }:
-            added += _create_daily_household_collections(assignment, stop)
+            created_rows, customer_count = _create_daily_household_collections(
+                assignment, stop, start_sequence=next_sequence,
+            )
+            added += created_rows
+            next_sequence += customer_count
 
     return added
 

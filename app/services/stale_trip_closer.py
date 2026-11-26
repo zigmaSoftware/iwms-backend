@@ -9,9 +9,12 @@ For every assignment dated BEFORE `today` that is still `In Progress`:
   * every unresolved stop (bin and household) is marked Missed / Not
     Available with an explanatory reason,
   * a remark says the system closed the trip,
-  * the trip is closed as `Completed` (stamped at the end of its own date, so
-    the duration never spans into the next day), and its DailyTripLog is
-    refreshed so it appears in History.
+  * if any stop had to be marked missed, the trip was only started, never
+    finished, so it is closed as `Expired` (no end timestamp). Only a trip
+    whose stops were all already resolved — the driver just never pressed
+    End — is closed as `Completed` (stamped at the end of its own date, so
+    the duration never spans into the next day),
+  * its DailyTripLog is refreshed so it appears in History.
 
 Trips waiting on a supervisor decision (a pending Re-Trip request or a pending
 vehicle-breakdown review) are skipped: that decision is the supervisor's, and
@@ -50,6 +53,10 @@ STOP_REASON = "Not collected: trip closed automatically at end of day."
 TRIP_REMARK = (
     "Closed automatically by the system at end of day. "
     "{count} unresolved stop(s) were marked as missed."
+)
+EXPIRED_REMARK = (
+    "Expired automatically by the system at end of day: the trip was started "
+    "but not completed. {count} unresolved stop(s) were marked as missed."
 )
 CONTINUATION_STOP_REASON = (
     "Not collected: the next trip carrying this stop was never started on its day."
@@ -157,10 +164,19 @@ def _cancel_unstarted_continuation(assignment):
 def _close_one(assignment):
     count = _miss_unresolved_stops(assignment, STOP_REASON)
 
-    remark = TRIP_REMARK.format(count=count)
+    remark = (EXPIRED_REMARK if count else TRIP_REMARK).format(count=count)
     assignment.remarks = (
         f"{assignment.remarks}\n{remark}" if assignment.remarks else remark
     )
+    if count:
+        # Started but not finished: Expired, and no end timestamp (see
+        # DailyTripAssignment.expire_stale_assignments).
+        assignment.status = DailyTripAssignment.STATUS_EXPIRED
+        assignment.save(update_fields=["remarks", "status", "updated_at"])
+        log = getattr(assignment, "daily_trip_log", None)
+        if log is not None:
+            log.save()
+        return count
     assignment.save(update_fields=["remarks", "updated_at"])
 
     ended_at = max(
@@ -178,7 +194,8 @@ def _close_one(assignment):
 
 
 def close_stale_trips(today=None, log=None):
-    """Close every past-dated In Progress trip. Returns a summary dict."""
+    """Close every past-dated In Progress trip (Expired if work was left,
+    Completed if every stop was already resolved). Returns a summary dict."""
     today = today or timezone.localdate()
     log = log or logger
     stale = DailyTripAssignment.objects.filter(

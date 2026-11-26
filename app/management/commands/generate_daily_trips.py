@@ -46,8 +46,6 @@ def run_for_date(target_date=None, logger=None, force=False):
         status=TripPlan.Status.ACTIVE,
         is_auto_assign=True,
     )
-    if not force:
-        plans = plans.filter(approval_status=TripPlan.ApprovalStatus.APPROVED)
 
     created_count = 0
     skipped_count = 0
@@ -113,11 +111,7 @@ def run_for_date(target_date=None, logger=None, force=False):
             # Leaving this out fell back to the assignment model's PENDING
             # default and produced an impossible approval warning after the
             # driver had already started collecting.
-            "approval_status": (
-                DailyTripAssignment.APPROVAL_APPROVED
-                if plan.approval_status == TripPlan.ApprovalStatus.APPROVED
-                else DailyTripAssignment.APPROVAL_PENDING
-            ),
+            "approval_status": DailyTripAssignment.APPROVAL_APPROVED,
         }
 
         with transaction.atomic():

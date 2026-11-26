@@ -2,6 +2,8 @@ from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import Sum
+from datetime import datetime
+
 from django.utils import timezone
 
 from app.models.core_modules.daily_operations.bin_collection_event import BinCollectionEvent
@@ -174,7 +176,12 @@ class BinCollectionEventViewSet(BulkUploadMixin, AuditViewSetMixin, CompanyScope
         event_status = getattr(event, "status", BinCollectionEvent.STATUS_COLLECTED)
         if event_status == BinCollectionEvent.STATUS_COLLECTED:
             trip_cp.collected_weight_kg = event.collected_weight_kg or 0
-            trip_cp.collected_at = getattr(event, "created_at", None) or timezone.now()
+            if event.collection_date and event.collection_time:
+                trip_cp.collected_at = timezone.make_aware(
+                    datetime.combine(event.collection_date, event.collection_time)
+                )
+            else:
+                trip_cp.collected_at = getattr(event, "created_at", None) or timezone.now()
             trip_cp.is_collected = True
             trip_cp.status = DailyTripCollectionPoint.STATUS_COLLECTED
             trip_cp.status_reason = None
@@ -200,6 +207,11 @@ class BinCollectionEventViewSet(BulkUploadMixin, AuditViewSetMixin, CompanyScope
         assignment = trip_cp.trip_assignment
         if not assignment:
             return
+        # Recording work on a trip means it has started; this also makes it
+        # the vehicle/crew's active trip for the one-trip-at-a-time rule.
+        assignment.mark_started(
+            at=getattr(event, "created_at", None) or timezone.localtime()
+        )
         assignment.mark_completed_if_all_cps_collected()
         self._upsert_trip_log_for_assignment(assignment)
 

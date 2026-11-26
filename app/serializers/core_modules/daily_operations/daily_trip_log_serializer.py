@@ -415,6 +415,11 @@ class DailyTripLogSerializer(TenancyReadSerializerMixin, serializers.ModelSerial
                 .exclude(status_evidence_image="")
                 .order_by("trip_collection_point_id", "-created_at")
             )
+            evidence_waste_type_names = dict(
+                WasteType.objects.filter(
+                    unique_id__in=[event.waste_type_id for event in evidence_events if event.waste_type_id]
+                ).values_list("unique_id", "waste_type_name")
+            )
             for event in evidence_events:
                 if event.trip_collection_point_id in evidence_by_stop:
                     continue
@@ -424,11 +429,13 @@ class DailyTripLogSerializer(TenancyReadSerializerMixin, serializers.ModelSerial
                         "url": url,
                         "trip_collection_point_id": event.trip_collection_point_id,
                         "bin_collection_event_id": event.unique_id,
+                        "waste_type_name": evidence_waste_type_names.get(event.waste_type_id),
                         "image_type": "status_evidence",
                     }]
         return [
             {
                 "unique_id": related(tcp, "collection_point").unique_id,
+                "trip_collection_point_id": tcp.unique_id,
                 "cp_name": related(tcp, "collection_point").cp_name,
                 "sequence": tcp.sequence,
                 "is_collected": tcp.is_collected,
@@ -439,7 +446,13 @@ class DailyTripLogSerializer(TenancyReadSerializerMixin, serializers.ModelSerial
                     else None
                 ),
                 "waste_type_breakdown": breakdown_by_stop.get(tcp.unique_id, []),
+                "collected_at": tcp.collected_at.isoformat() if tcp.collected_at else None,
                 "capture_images": evidence_by_stop.get(tcp.unique_id, []),
+                "status_evidence_image_url": (
+                    evidence_by_stop[tcp.unique_id][0]["url"]
+                    if evidence_by_stop.get(tcp.unique_id)
+                    else None
+                ),
             }
             for tcp in cps
             if tcp.collection_point_id

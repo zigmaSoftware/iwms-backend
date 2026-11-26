@@ -926,6 +926,14 @@ class DailyTripAssignmentSerializer(TenancyReadSerializerMixin, serializers.Mode
                 w.unique_id: w
                 for w in WasteCollection.objects.filter(unique_id__in=waste_collection_ids)
             }
+        # Bulk generators have no common waste type — show each customer's own.
+        customer_waste_type_ids = {
+            wid for c in customers_by_id.values() for wid in c.get_waste_type_ids()
+        }
+        customer_waste_type_names = dict(
+            WasteType.objects.filter(unique_id__in=customer_waste_type_ids)
+            .values_list("unique_id", "waste_type_name")
+        ) if customer_waste_type_ids else {}
         result = []
         for stop in stops:
             customer = customers_by_id.get(stop.customer_id)
@@ -938,6 +946,11 @@ class DailyTripAssignmentSerializer(TenancyReadSerializerMixin, serializers.Mode
                     "customer_name": getattr(customer, "customer_name", None),
                     "building_no": getattr(customer, "building_no", None),
                     "street": getattr(customer, "street", None),
+                    "waste_types": [
+                        {"unique_id": wid, "waste_type_name": customer_waste_type_names[wid]}
+                        for wid in customer.get_waste_type_ids()
+                        if wid in customer_waste_type_names
+                    ],
                 } if customer else None,
                 "collection_type": stop.collection_type,
                 "sequence": stop.sequence,
@@ -1071,6 +1084,8 @@ class DailyTripAssignmentSerializer(TenancyReadSerializerMixin, serializers.Mode
         ward_ids = validated_data.pop("ward_ids", None)
         self._pop_waste_types(validated_data)
         self._normalize_related_ids(validated_data)
+        # No approval step for daily trips — new assignments are approved.
+        validated_data.setdefault("approval_status", DailyTripAssignment.APPROVAL_APPROVED)
         assignment = super().create(validated_data)
         self._sync_wards(assignment, ward_ids)
         sync_daily_assignment_stops_from_plan(assignment)
@@ -1206,38 +1221,9 @@ class DailyTripAssignmentSerializer(TenancyReadSerializerMixin, serializers.Mode
                 }
             )
 
-        if trip_date and (staff_template or vehicle):
-            busy_qs = DailyTripAssignment.objects.filter(
-                trip_date=trip_date,
-                is_deleted=False,
-            ).exclude(
-                status__in=[
-                    DailyTripAssignment.STATUS_CANCELLED,
-                    DailyTripAssignment.STATUS_COMPLETED,
-                ]
-            )
-            if instance:
-                busy_qs = busy_qs.exclude(pk=instance.pk)
-
-            if staff_template and busy_qs.filter(staff_template_id=staff_template).exists():
-                raise serializers.ValidationError(
-                    {
-                        "staff_template_id": (
-                            "This staff template is already assigned to another "
-                            "trip today. Complete or unassign that trip first."
-                        )
-                    }
-                )
-            vehicle_id = vehicle.unique_id if hasattr(vehicle, "unique_id") else vehicle
-            if vehicle_id and busy_qs.filter(vehicle_id=vehicle_id).exists():
-                raise serializers.ValidationError(
-                    {
-                        "vehicle_id": (
-                            "This vehicle is already assigned to another trip "
-                            "today. Complete or unassign that trip first."
-                        )
-                    }
-                )
+        # Multiple plans may be scheduled against the same vehicle and crew.
+        # Their scheduled_time creates a queue; exclusivity is enforced when
+        # the driver starts a trip, not while the supervisor plans the day.
         if staff_template and trip_date and "alt_staff_template_id" not in attrs:
             alt_template = AlternativeStaffTemplate.objects.filter(
                 staff_template_id=staff_template,
@@ -1265,7 +1251,7 @@ class DailyTripAssignmentStatusSerializer(serializers.Serializer):
 
         current = instance.status
         new = value
-        if new == DailyTripAssignment.STATUS_CANCELLED:
+        if new in (DailyTripAssignment.STATUS_CANCELLED, DailyTripAssignment.STATUS_EXPIRED):
             return value
 
         allowed_next = self.VALID_TRANSITIONS.get(current, [])
@@ -1275,14 +1261,8 @@ class DailyTripAssignmentStatusSerializer(serializers.Serializer):
                 f"Allowed: {allowed_next or ['Cancelled']}."
             )
 
-        if (
-            new == DailyTripAssignment.STATUS_IN_PROGRESS
-            and instance.approval_status != DailyTripAssignment.APPROVAL_APPROVED
-        ):
-            raise serializers.ValidationError(
-                "Trip must be Approved before it can be started."
-            )
-
+        # Trip approval workflow has been removed — a scheduled trip can be
+        # started without being approved first.
         return value
 
 

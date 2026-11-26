@@ -48,6 +48,10 @@ class BinCollectionEvent(BaseMaster):
     collected_weight_kg = models.DecimalField(
         max_digits=10, decimal_places=2, null=True, blank=True,
     )
+    # Time-only, like WasteCollection.collection_time (household) — the date
+    # lives in collection_date. Stamped when the bin is marked Collected,
+    # empty otherwise.
+    collection_time = models.TimeField(null=True, blank=True)
     status = models.CharField(
         max_length=20,
         choices=STATUS_CHOICES,
@@ -107,6 +111,14 @@ class BinCollectionEvent(BaseMaster):
                         self.ward_id = ward.unique_id
                         if not self.zone_id:
                             self.zone_id = ward.zone_id
+        if self.status == self.STATUS_COLLECTED:
+            if not self.collection_time:
+                self.collection_time = timezone.localtime().time().replace(microsecond=0)
+        else:
+            self.collection_time = None
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "status" in update_fields:
+            kwargs["update_fields"] = {*update_fields, "collection_time"}
         super().save(*args, **kwargs)
 
     def __str__(self):

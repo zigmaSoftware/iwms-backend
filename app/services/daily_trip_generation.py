@@ -43,10 +43,6 @@ def active_auto_assign_plans(force: bool = False):
         status=TripPlan.Status.ACTIVE,
         is_auto_assign=True,
     )
-    if not force:
-        queryset = queryset.filter(
-            approval_status=TripPlan.ApprovalStatus.APPROVED,
-        )
     return queryset
 
 
@@ -68,7 +64,7 @@ def ensure_assignment_collection_points(assignment: DailyTripAssignment, created
             # a bin are excluded below (DailyTripCollectionPoint needs a bin).
             collection_type__in=[
                 TripPlanCollectionPoint.COLLECTION_TYPE_BIN,
-                Collection_point.COLLECTION_TYPE_BULK,
+                TripPlanCollectionPoint.COLLECTION_TYPE_BULK,
             ],
             is_active=True,
             is_deleted=False,
@@ -126,11 +122,7 @@ def generate_assignment_for_plan(plan: TripPlan, target_date, created_by=None):
         "waste_type_ids": plan_waste_type_ids,
         "panchayat_id": plan.panchayat_id,
         "scheduled_time": plan.scheduled_time,
-        "approval_status": (
-            DailyTripAssignment.APPROVAL_APPROVED
-            if plan.approval_status == TripPlan.ApprovalStatus.APPROVED
-            else DailyTripAssignment.APPROVAL_PENDING
-        ),
+        "approval_status": DailyTripAssignment.APPROVAL_APPROVED,
     }
     assignment = (
         DailyTripAssignment.objects.filter(
