@@ -79,20 +79,9 @@ class TripPlanCollectionPoint(BaseMaster):
         ]
 
     def clean(self):
-        # A stop's type must match its plan's declared collection_type - a
-        # plan generates exactly one category of daily work (see
-        # TripPlan.collection_type), so a household_collection plan can only
-        # carry household-type stops, and a bin_collection plan only bin
-        # stops. (Whether a bulk stop may be added manually is enforced at
-        # the API/serializer layer; the auto-generated bulk placeholder row
-        # is still valid here.)
-        if self.trip_plan_id:
-            from app.models.core_modules.schedule_setup.trip_plan import TripPlan
-            tp = TripPlan.objects.filter(unique_id=self.trip_plan_id).first()
-            if tp and self.collection_type != tp.collection_type:
-                raise ValidationError(
-                    {"collection_type": "Stop type must match the trip plan's collection type."}
-                )
+        # A plan can combine bin/secondary, household and bulk stops.  The
+        # plan-level collection_type is retained as a legacy/default display
+        # value; each stop is the authoritative collection mode.
         if self.collection_type == self.COLLECTION_TYPE_BIN:
             if not self.collection_point_id:
                 raise ValidationError({"collection_point_id": "Collection point is required for bin collection."})

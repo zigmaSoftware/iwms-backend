@@ -52,10 +52,10 @@ def test_closes_past_in_progress_trip_and_marks_unresolved_stops_missed(
     assert result["closed"] == [trip.unique_id]
     assert result["stops_marked_missed"] == 2
     trip.refresh_from_db()
-    assert trip.status == DailyTripAssignment.STATUS_COMPLETED
-    assert "Closed automatically by the system" in trip.remarks
-    assert trip.actual_end_at is not None
-    assert trip.actual_end_at.date() == trip.trip_date
+    # Started but left unfinished: Expired, never Completed, and no end time.
+    assert trip.status == DailyTripAssignment.STATUS_EXPIRED
+    assert "Expired automatically by the system" in trip.remarks
+    assert trip.actual_end_at is None
     done.refresh_from_db()
     pending.refresh_from_db()
     later.refresh_from_db()
@@ -63,6 +63,23 @@ def test_closes_past_in_progress_trip_and_marks_unresolved_stops_missed(
     for stop in (pending, later):
         assert stop.status == DailyTripCollectionPoint.STATUS_MISSED
         assert stop.status_reason == STOP_REASON
+
+
+@pytest.mark.django_db
+def test_fully_resolved_trip_left_open_is_closed_as_completed(company, project):
+    """Every stop done but the driver never pressed End: that work was
+    finished, so the trip closes as Completed at the end of its own day."""
+    trip = _trip(company, project, days_ago=1)
+    _bin_stop(trip, company, project, DailyTripCollectionPoint.STATUS_COLLECTED, 1)
+
+    result = close_stale_trips()
+
+    assert result["closed"] == [trip.unique_id]
+    trip.refresh_from_db()
+    assert trip.status == DailyTripAssignment.STATUS_COMPLETED
+    assert "Closed automatically by the system" in trip.remarks
+    assert trip.actual_end_at is not None
+    assert trip.actual_end_at.date() == trip.trip_date
 
 
 @pytest.mark.django_db
@@ -119,7 +136,7 @@ def test_expires_leftover_retrip_request_then_closes_trip(company, project):
     request.refresh_from_db()
     assert request.status == TripRetripRequest.STATUS_EXPIRED
     trip.refresh_from_db()
-    assert trip.status == "Completed"
+    assert trip.status == "Expired"
 
 
 @pytest.mark.django_db
@@ -130,4 +147,4 @@ def test_is_idempotent(company, project):
     second = close_stale_trips()
     assert second["closed"] == []
     trip.refresh_from_db()
-    assert trip.remarks.count("Closed automatically") == 1
+    assert trip.remarks.count("Expired automatically") == 1

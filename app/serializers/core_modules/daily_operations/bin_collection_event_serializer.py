@@ -106,6 +106,7 @@ class BinCollectionEventSerializer(TenancyReadSerializerMixin, serializers.Model
             "display_code",
             "collection_date",
             "collected_weight_kg",
+            "collection_time",
             "status",
             "status_reason",
             "status_evidence_image",
@@ -131,6 +132,7 @@ class BinCollectionEventSerializer(TenancyReadSerializerMixin, serializers.Model
             "panchayat_id",
             "vehicle_breakdown_id",
             "breakdown_info",
+            "collection_time",
             "created_at",
             "updated_at",
         ]
@@ -270,6 +272,20 @@ class BinCollectionEventSerializer(TenancyReadSerializerMixin, serializers.Model
             raise serializers.ValidationError(
                 "Trip collection point does not belong to the selected assignment."
             )
+
+        # Same rule as the operator app: a vehicle/crew works one trip at a
+        # time, so a new trip cannot take collections while another is open.
+        if self.instance is None and assignment:
+            blocker = assignment.collection_blocking_assignment()
+            if blocker:
+                raise serializers.ValidationError(
+                    {
+                        "trip_assignment_id": (
+                            f"Complete trip {blocker.unique_id} first. This vehicle/crew "
+                            "cannot start another trip until it is finished."
+                        )
+                    }
+                )
 
         # Set location from assignment — panchayat/ward/zone are now plain
         # unique_id CharFields; ward/zone are resolved from the assignment's

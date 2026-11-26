@@ -145,6 +145,7 @@ class ScanBinViewSet(ActionAuditMixin, viewsets.ViewSet):
                     "unique_id": event.unique_id,
                     "event_at": event.created_at.isoformat(),
                     "event_type": event.status,
+                    "collection_time": event.collection_time.isoformat() if event.collection_time else None,
                     "collected_weight_kg": str(event.collected_weight_kg),
                     "status_reason": event.status_reason,
                     "evidence_image_url": request.build_absolute_uri(

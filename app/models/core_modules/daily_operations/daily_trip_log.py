@@ -288,7 +288,11 @@ class DailyTripLog(BaseMaster):
             from datetime import datetime
             from app.models.core_modules.daily_operations.daily_trip_assignment import DailyTripAssignment
             assignment = DailyTripAssignment.objects.filter(unique_id=self.trip_assignment_id).first()
-            if assignment and assignment.status != DailyTripAssignment.STATUS_COMPLETED:
+            if assignment and assignment.status not in (
+                DailyTripAssignment.STATUS_COMPLETED,
+                DailyTripAssignment.STATUS_EXPIRED,
+                DailyTripAssignment.STATUS_CANCELLED,
+            ):
                 ended_at = timezone.make_aware(
                     datetime.combine(self.trip_date, self.actual_end_time)
                 )

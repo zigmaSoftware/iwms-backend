@@ -83,7 +83,7 @@ class TripPlan(BaseMaster):
         choices=COLLECTION_TYPE_CHOICES,
         default=COLLECTION_TYPE_BIN,
         db_index=True,
-        help_text="One Trip Plan can generate only one category of daily work.",
+        help_text="Legacy/default collection mode; individual stops may use different modes.",
     )
     # Household mode only: which customers are auto-assigned.
     include_with_qr = models.BooleanField(
@@ -195,10 +195,12 @@ class TripPlan(BaseMaster):
         return [w for w in self.waste_type_ids_csv.split(",") if w]
 
     def apply_qr_scope(self, queryset):
-        """Narrow a CustomerCreation queryset by the With QR / Without QR
-        choice. Only household plans use it; other modes are untouched."""
-        if self.collection_type != self.COLLECTION_TYPE_HOUSEHOLD:
-            return queryset
+        """Narrow household-stop customers by the plan's QR choices.
+
+        Callers invoke this only for household stops, which also makes it
+        work when a mixed plan retains ``bin_collection`` as its legacy
+        plan-level default.
+        """
         if self.include_with_qr and self.include_without_qr:
             return queryset
         if self.include_without_qr:

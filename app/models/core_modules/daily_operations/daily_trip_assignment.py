@@ -51,12 +51,14 @@ class DailyTripAssignment(BaseMaster):
     STATUS_IN_PROGRESS = "In Progress"
     STATUS_COMPLETED = "Completed"
     STATUS_CANCELLED = "Cancelled"
+    STATUS_EXPIRED = "Expired"
 
     STATUS_CHOICES = [
         (STATUS_SCHEDULED, "Scheduled"),
         (STATUS_IN_PROGRESS, "In Progress"),
         (STATUS_COMPLETED, "Completed"),
         (STATUS_CANCELLED, "Cancelled"),
+        (STATUS_EXPIRED, "Expired"),
     ]
 
     APPROVAL_PENDING = "Pending"
@@ -323,6 +325,61 @@ class DailyTripAssignment(BaseMaster):
             operational_status=VehicleCreation.OperationalStatus.BREAKDOWN,
         ).exists()
 
+    @classmethod
+    def expire_stale_assignments(cls, service_date=None):
+        """Close unfinished work from an earlier service date.
+
+        A daily assignment is never allowed to remain actionable on a later
+        day.  This is intentionally a bulk update: an expired trip must not
+        acquire an end timestamp, because it was not completed.
+        """
+        service_date = service_date or timezone.localdate()
+        return cls.objects.filter(
+            trip_date__lt=service_date,
+            is_deleted=False,
+            status__in=(cls.STATUS_SCHEDULED, cls.STATUS_IN_PROGRESS),
+        ).update(status=cls.STATUS_EXPIRED)
+
+    def start_blocking_assignment(self):
+        """Return the trip that must finish before this one may start.
+
+        Plans may be queued for the same vehicle or crew. A trip cannot start
+        while (a) another of that resource's trips today is already
+        In Progress — whatever its scheduled time — or (b) an earlier item in
+        that resource's same-day queue is still unfinished.
+        """
+        if not self.trip_date or not (self.vehicle_id or self.staff_template_id):
+            return None
+        candidates = DailyTripAssignment.objects.filter(
+            trip_date=self.trip_date,
+            is_deleted=False,
+            status__in=(self.STATUS_SCHEDULED, self.STATUS_IN_PROGRESS),
+        ).exclude(pk=self.pk)
+        resource_filter = Q()
+        if self.vehicle_id:
+            resource_filter |= Q(vehicle_id=self.vehicle_id)
+        if self.staff_template_id:
+            resource_filter |= Q(staff_template_id=self.staff_template_id)
+        candidates = candidates.filter(resource_filter).order_by(
+            "scheduled_time", "created_at", "unique_id"
+        )
+        running = candidates.filter(status=self.STATUS_IN_PROGRESS).first()
+        if running:
+            return running
+        own_key = (self.scheduled_time, self.created_at, self.unique_id)
+        for candidate in candidates:
+            if (candidate.scheduled_time, candidate.created_at, candidate.unique_id) < own_key:
+                return candidate
+        return None
+
+    def collection_blocking_assignment(self):
+        """For web collection entry: the trip blocking work on this one, or
+        None. A trip that is already running is never blocked — it is the
+        crew's active trip."""
+        if self.actual_start_at or self.status == self.STATUS_IN_PROGRESS:
+            return None
+        return self.start_blocking_assignment()
+
     def mark_started(self, at=None):
         """Put the trip In Progress and stamp the start timestamps.
 
@@ -332,7 +389,7 @@ class DailyTripAssignment(BaseMaster):
         for a trip that was forced In Progress without one (e.g. the vehicle
         breakdown replacement path).
         """
-        if self.status in (self.STATUS_COMPLETED, self.STATUS_CANCELLED):
+        if self.status in (self.STATUS_COMPLETED, self.STATUS_CANCELLED, self.STATUS_EXPIRED):
             return False
 
         started_at = at or timezone.localtime()
@@ -444,6 +501,9 @@ class DailyTripAssignment(BaseMaster):
             ]
         ).exists():
             return False
+        # Combined trips also carry household stops — those must be done too.
+        if self.pending_household_stops().exists():
+            return False
         if self.status == self.STATUS_COMPLETED:
             return True
         if not auto_end:
@@ -474,6 +534,9 @@ class DailyTripAssignment(BaseMaster):
         if not children.exists():
             return False
         if self.pending_household_stops().exists():
+            return False
+        # Combined trips also carry bin stops — those must be done too.
+        if self.pending_bin_stops().exists():
             return False
         if self.status == self.STATUS_COMPLETED:
             return True

@@ -463,7 +463,16 @@ class TripPlanSerializer(TenancyReadSerializerMixin, serializers.ModelSerializer
 
     def get_plan_collection_points(self, obj):
         result = []
-        for stop in self._stops(obj):
+        stops = list(self._stops(obj))
+        # Each bin carries its own waste type — look them up in one query.
+        bin_waste_type_ids = {
+            getattr(related(stop, "bin"), "wastetype_id", None) for stop in stops
+        } - {None, ""}
+        waste_type_names = dict(
+            WasteType.objects.filter(unique_id__in=bin_waste_type_ids)
+            .values_list("unique_id", "waste_type_name")
+        ) if bin_waste_type_ids else {}
+        for stop in stops:
             cp = related(stop, "collection_point")
             bin_obj = related(stop, "bin")
             customer = related(stop, "customer")
@@ -479,6 +488,7 @@ class TripPlanSerializer(TenancyReadSerializerMixin, serializers.ModelSerializer
                 "bin": {
                     "unique_id": bin_obj.unique_id,
                     "bin_name": bin_obj.bin_name,
+                    "waste_type_name": waste_type_names.get(bin_obj.wastetype_id),
                 } if bin_obj else None,
                 "customer_id": stop.customer_id,
                 "customer": {
@@ -491,25 +501,35 @@ class TripPlanSerializer(TenancyReadSerializerMixin, serializers.ModelSerializer
         return result
 
     def get_stop_count(self, obj):
+        # A plan can mix modes (secondary bins + household + bulk), so count
+        # every active bin stop plus every customer the household / bulk
+        # stops expand to — regardless of the plan's primary collection_type.
         stops = [stop for stop in self._stops(obj) if stop.is_active]
-        if obj.collection_type == TripPlan.COLLECTION_TYPE_BIN:
-            return len(stops)
+        customer_stop_types = {
+            TripPlanCollectionPoint.COLLECTION_TYPE_HOUSEHOLD,
+            TripPlanCollectionPoint.COLLECTION_TYPE_BULK,
+        }
+        # Secondary stops are counted per collection point, not per bin —
+        # several bins at the same collection point are one physical stop.
+        bin_stop_count = len({
+            stop.collection_point_id or f"bin:{stop.bin_id or stop.pk}"
+            for stop in stops
+            if stop.collection_type not in customer_stop_types
+        })
+        customer_stops = [stop for stop in stops if stop.collection_type in customer_stop_types]
+        if not customer_stops:
+            return bin_stop_count
 
         ward_ids = [w.unique_id for w in self._wards(obj)]
         customer_ids = set()
-        for stop in stops:
-            if stop.collection_type not in {
-                TripPlanCollectionPoint.COLLECTION_TYPE_HOUSEHOLD,
-                TripPlanCollectionPoint.COLLECTION_TYPE_BULK,
-            }:
-                continue
+        for stop in customer_stops:
             # _customers_for_household_stop already applies the plan's
             # With QR / Without QR choice.
             customer_ids.update(
                 _customers_for_household_stop(stop, wards=ward_ids)
                 .values_list("unique_id", flat=True)
             )
-        return len(customer_ids)
+        return bin_stop_count + len(customer_ids)
 
     def validate(self, attrs):
         attrs.pop("company_id_input", None)
@@ -599,16 +619,16 @@ class TripPlanSerializer(TenancyReadSerializerMixin, serializers.ModelSerializer
 
             bin_stop_keys = set()
             household_stop_keys = set()
-            saw_auto_assign_stop = False
+            # One auto-assign catch-all stop per type (household / bulk) —
+            # a plan may collect both, each expanded independently.
+            auto_assign_stop_types = set()
             for stop in stops:
                 collection_type = stop.get(
                     "collection_type",
                     TripPlanCollectionPoint.COLLECTION_TYPE_BIN,
                 )
-                if collection_type != plan_collection_type:
-                    raise serializers.ValidationError(
-                        {"collection_points": "Stop type must match the trip plan's Collection Mode."}
-                    )
+                # collection_type is a legacy/default plan attribute.  A
+                # single route may contain any supported stop modes.
                 collection_point_id = stop.get("collection_point_id")
                 bin_id = stop.get("bin_id")
                 customer_id = stop.get("customer_id")
@@ -666,11 +686,11 @@ class TripPlanSerializer(TenancyReadSerializerMixin, serializers.ModelSerializer
                         # server-side (trip_plan_signals._customers_for_household_stop)
                         # rather than listed individually here. Only one such
                         # placeholder row is meaningful per plan.
-                        if saw_auto_assign_stop:
+                        if collection_type in auto_assign_stop_types:
                             raise serializers.ValidationError(
-                                {"collection_points": "Only one auto-assign stop is allowed per trip plan."}
+                                {"collection_points": "Only one auto-assign stop per collection type is allowed per trip plan."}
                             )
-                        saw_auto_assign_stop = True
+                        auto_assign_stop_types.add(collection_type)
                         continue
                     if customer_id in household_stop_keys:
                         raise serializers.ValidationError(
@@ -781,6 +801,9 @@ class TripPlanSerializer(TenancyReadSerializerMixin, serializers.ModelSerializer
     def create(self, validated_data):
         stops = validated_data.pop("collection_points", None)
         ward_ids = validated_data.pop("ward_ids", [])
+        # Trip plans no longer go through an approval step in the UI; treat new
+        # plans as approved so daily trip generation picks them up.
+        validated_data.setdefault("approval_status", TripPlan.ApprovalStatus.APPROVED)
         with transaction.atomic():
             trip_plan = super().create(validated_data)
             self._sync_wards(trip_plan, ward_ids)

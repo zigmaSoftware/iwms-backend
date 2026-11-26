@@ -129,6 +129,9 @@ class DailyTripAssignmentViewSet(BulkUploadMixin, AuditViewSetMixin, CompanyScop
     # ----------------------------------------------------------
 
     def get_queryset(self):
+        # Keep yesterday's unfinished assignments out of operational lists.
+        # This lazy sweep also covers installations without a cron worker.
+        DailyTripAssignment.expire_stale_assignments()
         qs = super().get_queryset()
 
         params = self.request.query_params
@@ -162,7 +165,11 @@ class DailyTripAssignmentViewSet(BulkUploadMixin, AuditViewSetMixin, CompanyScop
             raise ValidationError({"trip_view": "Use workbench or history."})
         self.trip_as_of = timezone.localtime()
         service_date = self.trip_as_of.date()
-        closed = [DailyTripAssignment.STATUS_COMPLETED, DailyTripAssignment.STATUS_CANCELLED]
+        closed = [
+            DailyTripAssignment.STATUS_COMPLETED,
+            DailyTripAssignment.STATUS_CANCELLED,
+            DailyTripAssignment.STATUS_EXPIRED,
+        ]
         if mode == "workbench":
             qs = qs.filter(Q(trip_date=service_date) | (Q(trip_date__lt=service_date) & ~Q(status__in=closed)))
         elif mode == "history":
@@ -691,8 +698,6 @@ class DailyTripAssignmentViewSet(BulkUploadMixin, AuditViewSetMixin, CompanyScop
             state = assignment.status
         elif plan.status != TripPlan.Status.ACTIVE:
             state, blocking_reason = "BLOCKED", "Trip Plan is inactive"
-        elif plan.approval_status != TripPlan.ApprovalStatus.APPROVED:
-            state, blocking_reason = "BLOCKED", "Trip Plan is awaiting approval"
         elif not scheduled_today:
             state, blocking_reason = "NOT_SCHEDULED", "Trip Plan does not run today"
         elif not plan.staff_template_id:
@@ -783,8 +788,6 @@ class DailyTripAssignmentViewSet(BulkUploadMixin, AuditViewSetMixin, CompanyScop
                 _, not_runnable = vehicle_substitution.vehicle_for_plan(plan, service_date)
                 if plan.status != TripPlan.Status.ACTIVE:
                     reason = "Trip Plan is inactive"
-                elif plan.approval_status != TripPlan.ApprovalStatus.APPROVED:
-                    reason = "Trip Plan is not approved"
                 elif not plan.staff_template_id or not plan.vehicle_id:
                     reason = "A team and vehicle are required"
                 elif active_notice_for_plan(plan.unique_id, service_date):
@@ -956,6 +959,8 @@ class DailyTripAssignmentViewSet(BulkUploadMixin, AuditViewSetMixin, CompanyScop
     def update_status(self, request, unique_id=None):
         instance = self.get_object()
         instance = DailyTripAssignment.objects.select_for_update().get(pk=instance.pk)
+        DailyTripAssignment.expire_stale_assignments()
+        instance.refresh_from_db()
         expected = request.data.get("expected_status")
         if expected and instance.status != expected:
             return Response({"detail": "This trip has changed. Refresh before taking action."}, status=409)
@@ -980,6 +985,35 @@ class DailyTripAssignmentViewSet(BulkUploadMixin, AuditViewSetMixin, CompanyScop
                 },
                 status=409,
             )
+        if new_status == DailyTripAssignment.STATUS_IN_PROGRESS:
+            if instance.trip_date != timezone.localdate():
+                return Response(
+                    {"detail": "Only today's trip can be started. Older trips expire at the end of their service day."},
+                    status=409,
+                )
+            # Lock competing rows before evaluating the queue so two start
+            # requests for the same vehicle/crew cannot both pass together.
+            resources = Q()
+            if instance.vehicle_id:
+                resources |= Q(vehicle_id=instance.vehicle_id)
+            if instance.staff_template_id:
+                resources |= Q(staff_template_id=instance.staff_template_id)
+            if resources:
+                list(DailyTripAssignment.objects.select_for_update().filter(
+                    trip_date=instance.trip_date, is_deleted=False,
+                ).filter(resources).values_list("pk", flat=True))
+            blocker = instance.start_blocking_assignment()
+            if blocker:
+                return Response(
+                    {
+                        "detail": (
+                            f"Complete or cancel earlier trip {blocker.unique_id} "
+                            f"({blocker.scheduled_time.strftime('%H:%M')}) before starting this trip."
+                        ),
+                        "blocking_assignment_id": blocker.unique_id,
+                    },
+                    status=409,
+                )
         previous_data = self._serialize_instance(instance)
         reason = str(request.data.get("reason") or "").strip()
         if reason:

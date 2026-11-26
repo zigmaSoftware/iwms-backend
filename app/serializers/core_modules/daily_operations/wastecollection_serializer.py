@@ -293,6 +293,21 @@ class WasteCollectionSerializer(TenancyReadSerializerMixin, serializers.ModelSer
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        assignment_id = attrs.get("trip_assignment_id")
+        if self.instance is None and assignment_id:
+            assignment = DailyTripAssignment.objects.filter(
+                unique_id=assignment_id, is_deleted=False
+            ).first()
+            blocker = assignment.collection_blocking_assignment() if assignment else None
+            if blocker:
+                raise serializers.ValidationError(
+                    {
+                        "trip_assignment_id": (
+                            f"Complete trip {blocker.unique_id} first. This vehicle/crew "
+                            "cannot start another trip until it is finished."
+                        )
+                    }
+                )
         status = attrs.get("status", getattr(self.instance, "status", None))
         if status != WasteCollection.STATUS_COLLECTED:
             return attrs

@@ -1,4 +1,4 @@
-"""Tests for Collection_point collection_type restriction (bin + bulk only)."""
+"""Tests for Collection_point collection_type restriction (bin only)."""
 import pytest
 from django.urls import reverse
 
@@ -38,10 +38,6 @@ def _cp_payload(company, project, state, district, city, panchayat, cp_name, col
 
 @pytest.mark.django_db
 class TestCollectionPointModelChoices:
-    def test_model_defines_bulk_choice(self):
-        assert Collection_point.COLLECTION_TYPE_BULK == "bulk_waste_collection"
-        assert ("bulk_waste_collection", "Bulk Waste Collection") in Collection_point.COLLECTION_TYPE_CHOICES
-
     def test_legacy_choices_retained(self):
         assert Collection_point.COLLECTION_TYPE_BIN == "bin_collection"
         assert Collection_point.COLLECTION_TYPE_HOUSEHOLD == "household_collection"
@@ -50,16 +46,15 @@ class TestCollectionPointModelChoices:
     def test_cp_choices_exclude_household(self):
         assert Collection_point.COLLECTION_TYPE_CP_CHOICES == [
             (Collection_point.COLLECTION_TYPE_BIN, "Bin Collection"),
-            (Collection_point.COLLECTION_TYPE_BULK, "Bulk Waste Collection"),
         ]
 
 
 @pytest.mark.django_db
 class TestCollectionPointSerializerChoices:
-    def test_serializer_field_exposes_bin_and_bulk_only(self):
+    def test_serializer_field_exposes_bin_only(self):
         field = CollectionPointSerializer().fields["collection_type"]
         allowed = {value for value, _ in field.choices.items()}
-        assert allowed == {"bin_collection", "bulk_waste_collection"}
+        assert allowed == {"bin_collection"}
         assert "household_collection" not in allowed
 
     def test_create_rejects_household(self, company, project, state, district, city, panchayat):
@@ -83,44 +78,6 @@ class TestCollectionPointSerializerChoices:
         )
         assert serializer.is_valid(), serializer.errors
         assert serializer.validated_data["collection_type"] == "bin_collection"
-
-    def test_create_accepts_bulk(self, company, project, state, district, city, panchayat):
-        serializer = CollectionPointSerializer(
-            data=_cp_payload(
-                company, project, state, district, city, panchayat,
-                cp_name="Bulk CP",
-                collection_type=Collection_point.COLLECTION_TYPE_BULK,
-            )
-        )
-        assert serializer.is_valid(), serializer.errors
-        assert serializer.validated_data["collection_type"] == "bulk_waste_collection"
-
-    @pytest.mark.parametrize(
-        ("field", "value", "message"),
-        [
-            ("latitude", "90.000001", "Latitude must be between -90 and 90."),
-            ("longitude", "180.000001", "Longitude must be between -180 and 180."),
-        ],
-    )
-    def test_secondary_collection_point_rejects_out_of_range_coordinates(
-        self, company, project, state, district, city, panchayat, field, value, message
-    ):
-        payload = _cp_payload(
-            company,
-            project,
-            state,
-            district,
-            city,
-            panchayat,
-            cp_name="Secondary CP coordinates",
-            collection_type=Collection_point.COLLECTION_TYPE_BIN,
-        )
-        payload[field] = value
-
-        serializer = CollectionPointSerializer(data=payload)
-
-        assert not serializer.is_valid()
-        assert serializer.errors[field] == [message]
 
 
 @pytest.mark.django_db
@@ -149,11 +106,10 @@ class TestCollectionPointChoicesEndpoint:
         resp = auth_client.get(url)
         assert resp.status_code == 200
         values = {item["value"] for item in resp.data}
-        assert values == {"bin_collection", "bulk_waste_collection"}
+        assert values == {"bin_collection"}
 
     def test_collection_type_choices_labels(self, auth_client):
         url = reverse("schedule-setup-collection-points-collection-type-choices")
         resp = auth_client.get(url)
         by_value = {item["value"]: item["label"] for item in resp.data}
         assert by_value["bin_collection"] == "Bin Collection"
-        assert by_value["bulk_waste_collection"] == "Bulk Waste Collection"
